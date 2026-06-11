@@ -2,24 +2,37 @@
 
 #include <arpa/inet.h>
 #include <netinet/in.h>
+#include <sys/mman.h>
+#include <sys/prctl.h>
 #include <sys/socket.h>
 #include <sys/utsname.h>
 #include <unistd.h>
 
 #include <array>
+#include <chrono>
 #include <cerrno>
+#include <cstdint>
 #include <cstring>
 #include <fstream>
 #include <iostream>
 #include <sstream>
 #include <string>
-#include <vector>
+#include <thread>
 
 namespace {
+
+constexpr std::uintptr_t kLsdriverSharedAddress = 0x2025827000ULL;
+constexpr std::size_t kLsdriverCommitTimeoutMs = 3000;
+constexpr std::size_t kLsdriverConnectTimeoutMs = 6000;
+constexpr std::uint32_t kMaxBreakpointSlots = 4;
+constexpr std::size_t kProcNameLen = 256;
 
 struct DriverProbe {
     bool moduleLoaded = false;
     bool procModulesReadable = false;
+    bool sharedMemoryOnline = false;
+    std::uint64_t numBrps = 0;
+    std::uint64_t numWrps = 0;
     std::string kernelRelease;
     std::string message;
 };
@@ -31,42 +44,140 @@ struct BreakpointSlot {
     std::uint32_t size = 0;
 };
 
-class BreakpointBackend {
-public:
-    xc::BreakpointSetResponse set(const xc::BreakpointSetRequest& request) {
-        xc::BreakpointSetResponse response;
-        response.slot = request.slot;
-        response.address = request.address;
-        response.type = request.type;
-        response.size = request.size;
-
-        if (request.slot >= slots_.size()) {
-            response.error = "slot out of range";
-            return response;
-        }
-        if (request.address == 0) {
-            response.error = "address is zero";
-            return response;
-        }
-        if (request.type != "execute" && request.type != "read" && request.type != "write" && request.type != "access") {
-            response.error = "unsupported breakpoint type";
-            return response;
-        }
-        if (request.size != 1 && request.size != 2 && request.size != 4 && request.size != 8) {
-            response.error = "unsupported breakpoint size";
-            return response;
-        }
-
-        slots_[request.slot] = BreakpointSlot{true, request.address, request.type, request.size};
-        response.ok = true;
-        response.enabled = true;
-        response.message = "硬件断点已写入 slot" + std::to_string(request.slot);
-        return response;
-    }
-
-private:
-    std::array<BreakpointSlot, 4> slots_{};
+enum hwbp_type {
+    HWBP_BREAKPOINT_EMPTY = 0,
+    HWBP_BREAKPOINT_R = 1,
+    HWBP_BREAKPOINT_W = 2,
+    HWBP_BREAKPOINT_RW = HWBP_BREAKPOINT_R | HWBP_BREAKPOINT_W,
+    HWBP_BREAKPOINT_X = 4,
+    HWBP_BREAKPOINT_INVALID = HWBP_BREAKPOINT_RW | HWBP_BREAKPOINT_X,
 };
+
+enum hwbp_len {
+    HWBP_BREAKPOINT_LEN_1 = 1,
+    HWBP_BREAKPOINT_LEN_2 = 2,
+    HWBP_BREAKPOINT_LEN_3 = 3,
+    HWBP_BREAKPOINT_LEN_4 = 4,
+    HWBP_BREAKPOINT_LEN_5 = 5,
+    HWBP_BREAKPOINT_LEN_6 = 6,
+    HWBP_BREAKPOINT_LEN_7 = 7,
+    HWBP_BREAKPOINT_LEN_8 = 8,
+};
+
+enum hwbp_scope {
+    SCOPE_MAIN_THREAD,
+    SCOPE_OTHER_THREADS,
+    SCOPE_ALL_THREADS,
+};
+
+struct hwbp_record {
+    std::uint8_t mask[18];
+    std::uint64_t hit_count;
+    std::uint64_t pc;
+    std::uint64_t lr;
+    std::uint64_t sp;
+    std::uint64_t orig_x0;
+    std::uint64_t syscallno;
+    std::uint64_t pstate;
+    std::uint64_t x0, x1, x2, x3, x4, x5, x6, x7, x8, x9;
+    std::uint64_t x10, x11, x12, x13, x14, x15, x16, x17, x18, x19;
+    std::uint64_t x20, x21, x22, x23, x24, x25, x26, x27, x28, x29;
+    std::uint32_t fpsr;
+    std::uint32_t fpcr;
+    unsigned __int128 q0, q1, q2, q3, q4, q5, q6, q7, q8, q9;
+    unsigned __int128 q10, q11, q12, q13, q14, q15, q16, q17, q18, q19;
+    unsigned __int128 q20, q21, q22, q23, q24, q25, q26, q27, q28, q29;
+    unsigned __int128 q30, q31;
+};
+
+struct hwbp_point {
+    hwbp_type bt;
+    hwbp_len bl;
+    hwbp_scope bs;
+    std::uint64_t hit_addr;
+    int record_count;
+    hwbp_record records[0x100];
+};
+
+struct hwbp_info {
+    std::uint64_t num_brps;
+    std::uint64_t num_wrps;
+    hwbp_point points[16];
+};
+
+struct segment_info {
+    short index;
+    std::uint8_t prot;
+    std::uint64_t start;
+    std::uint64_t end;
+};
+
+struct module_info {
+    char name[256];
+    int seg_count;
+    segment_info segs[10];
+};
+
+struct region_info {
+    std::uint64_t start;
+    std::uint64_t end;
+};
+
+struct memory_info {
+    int module_count;
+    module_info modules[1024];
+    int region_count;
+    region_info regions[16534];
+};
+
+struct virtual_input {
+    int POSITION_X, POSITION_Y;
+    int slot;
+    int x, y;
+};
+
+struct memory_rw {
+    std::uint64_t rw_addr;
+    std::uint8_t user_buffer[0x1000];
+    int size;
+};
+
+struct process_select_info {
+    char name[kProcNameLen];
+    int selected_pid;
+    std::uint64_t selected_rss_kb;
+};
+
+enum sm_req_op {
+    op_o,
+    op_r,
+    op_w,
+    op_m,
+    op_down,
+    op_move,
+    op_up,
+    op_init_touch,
+    op_brps_weps_info,
+    op_find_process_by_name,
+    op_set_process_hwbp,
+    op_remove_process_hwbp,
+    op_kexit,
+};
+
+struct req_obj {
+    bool kernel;
+    bool user;
+    sm_req_op op;
+    int status;
+    int pid;
+    process_select_info proc_info;
+    memory_rw rw_info;
+    memory_info mem_info;
+    virtual_input vinput_info;
+    hwbp_info bp_info;
+};
+
+static_assert(sizeof(hwbp_record::q0) == 16, "lsdriver ABI requires 128-bit Q registers");
 
 std::string readTextFile(const char* path) {
     std::ifstream input(path);
@@ -78,29 +189,16 @@ std::string readTextFile(const char* path) {
     return out.str();
 }
 
-DriverProbe probeDriver() {
-    DriverProbe probe;
-
-    utsname uts{};
-    if (::uname(&uts) == 0) {
-        probe.kernelRelease = uts.release;
-    } else {
-        probe.kernelRelease = "unknown";
+bool isDigits(const std::string& value) {
+    if (value.empty()) {
+        return false;
     }
-
-    const std::string modules = readTextFile("/proc/modules");
-    probe.procModulesReadable = !modules.empty();
-    probe.moduleLoaded = modules.find("lsdriver") != std::string::npos;
-
-    if (!probe.procModulesReadable) {
-        probe.message = "无法读取 /proc/modules，请确认已使用 root 权限运行，或检查 SELinux 策略";
-    } else if (!probe.moduleLoaded) {
-        probe.message = "未在 /proc/modules 中找到 lsdriver 驱动模块";
-    } else {
-        probe.message = "lsdriver 驱动模块已加载";
+    for (char c : value) {
+        if (c < '0' || c > '9') {
+            return false;
+        }
     }
-
-    return probe;
+    return true;
 }
 
 std::string jsonBool(bool value) {
@@ -123,11 +221,208 @@ std::string escapeJson(const std::string& value) {
     return out;
 }
 
+class LsdriverBackend {
+public:
+    LsdriverBackend() {
+        open();
+    }
+
+    ~LsdriverBackend() {
+        if (req_ && req_ != MAP_FAILED) {
+            munmap(req_, sizeof(req_obj));
+        }
+    }
+
+    DriverProbe probe() {
+        DriverProbe probe;
+        utsname uts{};
+        if (::uname(&uts) == 0) {
+            probe.kernelRelease = uts.release;
+        } else {
+            probe.kernelRelease = "unknown";
+        }
+
+        const std::string modules = readTextFile("/proc/modules");
+        probe.procModulesReadable = !modules.empty();
+        probe.moduleLoaded = modules.find("lsdriver") != std::string::npos;
+
+        if (!ensureMapped()) {
+            probe.message = lastError_;
+            return probe;
+        }
+
+        if (!waitForDriver(kLsdriverConnectTimeoutMs)) {
+            probe.message = "lsdriver shared memory not attached yet; start agent as LS after insmod";
+            return probe;
+        }
+
+        if (!commit(op_brps_weps_info)) {
+            probe.message = lastError_;
+            return probe;
+        }
+
+        probe.sharedMemoryOnline = true;
+        probe.moduleLoaded = true;
+        probe.numBrps = req_->bp_info.num_brps;
+        probe.numWrps = req_->bp_info.num_wrps;
+        probe.message = "lsdriver shared memory online, BRP=" + std::to_string(probe.numBrps)
+            + ", WRP=" + std::to_string(probe.numWrps);
+        return probe;
+    }
+
+    xc::BreakpointSetResponse set(const xc::BreakpointSetRequest& request) {
+        xc::BreakpointSetResponse response;
+        response.slot = request.slot;
+        response.address = request.address;
+        response.type = request.type;
+        response.size = request.size;
+
+        const std::string error = validate(request);
+        if (!error.empty()) {
+            response.error = error;
+            return response;
+        }
+        if (!ensureMapped()) {
+            response.error = lastError_;
+            return response;
+        }
+        if (!waitForDriver(kLsdriverConnectTimeoutMs)) {
+            response.error = "lsdriver did not attach shared memory at 0x2025827000";
+            return response;
+        }
+
+        bpInfo_.points[request.slot].bt = toDriverType(request.type);
+        bpInfo_.points[request.slot].bl = static_cast<hwbp_len>(request.size);
+        bpInfo_.points[request.slot].bs = SCOPE_ALL_THREADS;
+        bpInfo_.points[request.slot].hit_addr = request.address;
+        bpInfo_.points[request.slot].record_count = 0;
+        slots_[request.slot] = BreakpointSlot{true, request.address, request.type, request.size};
+
+        req_->pid = 0;
+        std::memset(&req_->proc_info, 0, sizeof(req_->proc_info));
+        if (isDigits(request.target)) {
+            req_->pid = std::stoi(request.target);
+        } else {
+            std::snprintf(req_->proc_info.name, sizeof(req_->proc_info.name), "%s", request.target.c_str());
+        }
+        req_->bp_info = bpInfo_;
+
+        if (!commit(op_set_process_hwbp)) {
+            response.error = lastError_;
+            return response;
+        }
+        if (req_->status != 0) {
+            response.error = "lsdriver op_set_process_hwbp failed: " + std::to_string(req_->status);
+            return response;
+        }
+
+        bpInfo_ = req_->bp_info;
+        response.ok = true;
+        response.enabled = true;
+        response.message = "lsdriver 已写入硬件断点 slot" + std::to_string(request.slot)
+            + " target=" + request.target;
+        return response;
+    }
+
+private:
+    bool ensureMapped() {
+        if (req_ && req_ != MAP_FAILED) {
+            return true;
+        }
+        return open();
+    }
+
+    bool open() {
+        ::prctl(PR_SET_NAME, "LS", 0, 0, 0);
+        void* mapped = ::mmap(reinterpret_cast<void*>(kLsdriverSharedAddress), sizeof(req_obj),
+            PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED, -1, 0);
+        if (mapped == MAP_FAILED) {
+            lastError_ = std::string("mmap 0x2025827000 failed: ") + std::strerror(errno);
+            req_ = nullptr;
+            return false;
+        }
+        req_ = static_cast<req_obj*>(mapped);
+        std::memset(req_, 0, sizeof(req_obj));
+        return true;
+    }
+
+    bool waitForDriver(std::size_t timeoutMs) {
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeoutMs);
+        while (std::chrono::steady_clock::now() < deadline) {
+            if (req_->user) {
+                return true;
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(20));
+        }
+        return false;
+    }
+
+    bool commit(sm_req_op op) {
+        req_->op = op;
+        req_->status = 0;
+        req_->user = false;
+        __sync_synchronize();
+        req_->kernel = true;
+        __sync_synchronize();
+
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(kLsdriverCommitTimeoutMs);
+        while (std::chrono::steady_clock::now() < deadline) {
+            __sync_synchronize();
+            if (req_->user) {
+                return true;
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+        lastError_ = "lsdriver request timed out";
+        return false;
+    }
+
+    std::string validate(const xc::BreakpointSetRequest& request) const {
+        if (request.slot >= kMaxBreakpointSlots) {
+            return "slot out of range";
+        }
+        if (request.address == 0) {
+            return "address is zero";
+        }
+        if (request.type != "execute" && request.type != "read" && request.type != "write" && request.type != "access") {
+            return "unsupported breakpoint type";
+        }
+        if (request.size < 1 || request.size > 8) {
+            return "unsupported breakpoint size";
+        }
+        if (request.target.empty()) {
+            return "target pid or process name is empty";
+        }
+        return {};
+    }
+
+    static hwbp_type toDriverType(const std::string& type) {
+        if (type == "execute") {
+            return HWBP_BREAKPOINT_X;
+        }
+        if (type == "read") {
+            return HWBP_BREAKPOINT_R;
+        }
+        if (type == "write") {
+            return HWBP_BREAKPOINT_W;
+        }
+        return HWBP_BREAKPOINT_RW;
+    }
+
+    req_obj* req_ = nullptr;
+    hwbp_info bpInfo_{};
+    std::array<BreakpointSlot, kMaxBreakpointSlots> slots_{};
+    std::string lastError_;
+};
+
 std::string driverStatusJson(std::uint64_t id, const DriverProbe& probe) {
     return "{\"id\":" + std::to_string(id)
         + ",\"ok\":true,\"driver\":{\"name\":\"lsdriver\",\"module_loaded\":"
         + jsonBool(probe.moduleLoaded)
         + ",\"proc_modules_readable\":" + jsonBool(probe.procModulesReadable)
+        + ",\"shared_memory_online\":" + jsonBool(probe.sharedMemoryOnline)
+        + ",\"num_brps\":" + std::to_string(probe.numBrps)
+        + ",\"num_wrps\":" + std::to_string(probe.numWrps)
         + ",\"kernel_release\":\"" + escapeJson(probe.kernelRelease)
         + "\",\"message\":\"" + escapeJson(probe.message) + "\"}}";
 }
@@ -149,14 +444,11 @@ std::string breakpointSetJson(std::uint64_t id, const xc::BreakpointSetResponse&
 void printStartupLog(const DriverProbe& probe, std::uint16_t port) {
     std::cout << "[agent] xc-hwbp-agent 启动中\n";
     std::cout << "[agent] 协议: " << xc::kProtocolName << " v" << xc::kProtocolVersion << "\n";
+    std::cout << "[agent] 进程名: LS\n";
+    std::cout << "[agent] 共享内存: 0x2025827000\n";
     std::cout << "[agent] 监听地址: 0.0.0.0:" << port << "\n";
     std::cout << "[agent] 内核版本: " << probe.kernelRelease << "\n";
-    std::cout << "[driver] /proc/modules 可读取: " << (probe.procModulesReadable ? "是" : "否") << "\n";
-    std::cout << "[driver] lsdriver 已加载: " << (probe.moduleLoaded ? "是" : "否") << "\n";
     std::cout << "[driver] 状态: " << probe.message << "\n";
-    if (!probe.moduleLoaded) {
-        std::cout << "[driver] 提示: 请先执行 insmod lsdriver.ko，驱动加载成功后再启动本 agent\n";
-    }
 }
 
 int createServer(std::uint16_t port) {
@@ -164,7 +456,6 @@ int createServer(std::uint16_t port) {
     if (fd < 0) {
         return -1;
     }
-
     int enabled = 1;
     ::setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &enabled, sizeof(enabled));
 
@@ -177,12 +468,10 @@ int createServer(std::uint16_t port) {
         ::close(fd);
         return -1;
     }
-
     if (::listen(fd, 4) != 0) {
         ::close(fd);
         return -1;
     }
-
     return fd;
 }
 
@@ -200,7 +489,7 @@ void sendLine(int fd, const std::string& line) {
     }
 }
 
-void handleClient(int clientFd, const DriverProbe& startupProbe, BreakpointBackend& breakpoints) {
+void handleClient(int clientFd, LsdriverBackend& breakpoints) {
     std::cout << "[net] 客户端已连接\n";
     sendLine(clientFd, xc::helloResponseJson(0));
 
@@ -217,7 +506,7 @@ void handleClient(int clientFd, const DriverProbe& startupProbe, BreakpointBacke
         if (request.find("hello") != std::string::npos) {
             sendLine(clientFd, xc::helloResponseJson(requestId == 0 ? 1 : requestId));
         } else if (request.find("driver.status") != std::string::npos) {
-            sendLine(clientFd, driverStatusJson(requestId == 0 ? 1 : requestId, probeDriver()));
+            sendLine(clientFd, driverStatusJson(requestId == 0 ? 1 : requestId, breakpoints.probe()));
         } else if (request.find("breakpoint.set") != std::string::npos) {
             const xc::BreakpointSetRequest setRequest = xc::parseBreakpointSetRequest(request);
             const xc::BreakpointSetResponse response = breakpoints.set(setRequest);
@@ -226,8 +515,6 @@ void handleClient(int clientFd, const DriverProbe& startupProbe, BreakpointBacke
             sendLine(clientFd, "{\"id\":" + std::to_string(requestId == 0 ? 1 : requestId) + ",\"ok\":false,\"error\":\"command not implemented\"}");
         }
     }
-
-    (void)startupProbe;
     std::cout << "[net] 客户端已断开\n";
 }
 
@@ -239,12 +526,9 @@ int main(int argc, char** argv) {
         port = static_cast<std::uint16_t>(std::stoi(argv[1]));
     }
 
-    const DriverProbe startupProbe = probeDriver();
+    LsdriverBackend breakpoints;
+    const DriverProbe startupProbe = breakpoints.probe();
     printStartupLog(startupProbe, port);
-    if (!startupProbe.moduleLoaded) {
-        std::cerr << "[driver] 致命错误: 未检测到 lsdriver，agent 退出，不启动网络监听\n";
-        return 2;
-    }
 
     const int serverFd = createServer(port);
     if (serverFd < 0) {
@@ -253,8 +537,6 @@ int main(int argc, char** argv) {
     }
 
     std::cout << "[net] 已开始监听，等待 PC 客户端连接\n";
-    BreakpointBackend breakpoints;
-
     while (true) {
         sockaddr_in clientAddress{};
         socklen_t clientLength = sizeof(clientAddress);
@@ -262,7 +544,7 @@ int main(int argc, char** argv) {
         if (clientFd < 0) {
             continue;
         }
-        handleClient(clientFd, startupProbe, breakpoints);
+        handleClient(clientFd, breakpoints);
         ::close(clientFd);
     }
 }
