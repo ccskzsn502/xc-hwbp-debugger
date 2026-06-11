@@ -36,6 +36,30 @@ int main() {
     require(!failed.ok, "failed status should parse ok=false");
     require(failed.error == "bad command", "error should parse");
 
+    const std::string setRequest = xc::breakpointSetRequestJson(7, 0, 0x78919CFF84ULL, "execute", 4);
+    require(setRequest == R"({"id":7,"cmd":"breakpoint.set","slot":0,"address":"0x78919cff84","type":"execute","size":4})", "breakpoint.set request should serialize address/type/size");
+
+    const auto setParsed = xc::parseBreakpointSetRequest(setRequest);
+    require(setParsed.id == 7, "breakpoint.set id should parse");
+    require(setParsed.slot == 0, "breakpoint.set slot should parse");
+    require(setParsed.address == 0x78919CFF84ULL, "breakpoint.set address should parse hex string");
+    require(setParsed.type == "execute", "breakpoint.set type should parse");
+    require(setParsed.size == 4, "breakpoint.set size should parse");
+
+    const std::string setResponseJson = R"({"id":7,"ok":true,"breakpoint":{"slot":0,"address":"0x78919cff84","type":"execute","size":4,"enabled":true,"message":"硬件断点已写入 slot0"}})";
+    const auto setResponse = xc::parseBreakpointSetResponse(setResponseJson);
+    require(setResponse.ok, "breakpoint.set response ok should parse");
+    require(setResponse.slot == 0, "breakpoint.set response slot should parse");
+    require(setResponse.address == 0x78919CFF84ULL, "breakpoint.set response address should parse");
+    require(setResponse.type == "execute", "breakpoint.set response type should parse");
+    require(setResponse.size == 4, "breakpoint.set response size should parse");
+    require(setResponse.enabled, "breakpoint.set response enabled should parse");
+    require(setResponse.message == "硬件断点已写入 slot0", "breakpoint.set response message should parse");
+
+    const auto setFailed = xc::parseBreakpointSetResponse(R"({"id":8,"ok":false,"error":"slot out of range"})");
+    require(!setFailed.ok, "failed breakpoint.set should parse ok=false");
+    require(setFailed.error == "slot out of range", "failed breakpoint.set error should parse");
+
     std::cout << "protocol tests passed\n";
     return 0;
 }

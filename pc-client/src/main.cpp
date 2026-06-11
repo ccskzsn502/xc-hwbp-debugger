@@ -6,6 +6,7 @@
 #include <cerrno>
 #include <cstdint>
 #include <cstring>
+#include <functional>
 #include <string>
 #include <vector>
 
@@ -67,7 +68,9 @@ struct ClientState {
     bool helloOk = false;
     xc::HelloResponse hello;
     xc::DriverStatusResponse driver;
+    xc::BreakpointSetResponse breakpoints[4];
     std::string endpoint = "192.168.1.10";
+    std::uint64_t breakpointAddress = 0x78919CFF84ULL;
     std::string lastError = "未连接";
     std::string lastAction = "就绪: 等待连接手机 agent";
     std::uint64_t requestId = 1;
@@ -235,12 +238,65 @@ void connectAndProbeAgent() {
     closeSocket(socket);
 }
 
+void setBreakpointSlot(std::uint32_t slot) {
+    ClientState& s = state();
+    s.lastAction = "正在写入硬件断点 slot" + std::to_string(slot);
+
+    std::string error;
+    const SocketHandle socket = connectSocket(s.endpoint, xc::kDefaultAgentPort, error);
+    if (socket == kInvalidSocket) {
+        s.lastError = error;
+        s.lastAction = "下断失败: " + error;
+        return;
+    }
+
+    const std::string helloLine = receiveLine(socket, error);
+    const xc::HelloResponse hello = xc::parseHelloResponse(helloLine);
+    if (!hello.ok || hello.protocol != xc::kProtocolName || hello.version != xc::kProtocolVersion) {
+        s.lastError = helloLine.empty() ? error : "Agent hello 不匹配: " + helloLine;
+        s.lastAction = "下断失败: 协议握手失败";
+        closeSocket(socket);
+        return;
+    }
+
+    const std::uint64_t requestId = s.requestId++;
+    const std::string request = xc::breakpointSetRequestJson(requestId, slot, s.breakpointAddress, "execute", 4);
+    if (!sendLine(socket, request)) {
+        s.lastError = "发送 breakpoint.set 失败";
+        s.lastAction = "下断请求发送失败";
+        closeSocket(socket);
+        return;
+    }
+
+    const std::string responseLine = receiveLine(socket, error);
+    if (responseLine.empty()) {
+        s.lastError = error;
+        s.lastAction = "下断失败: " + error;
+        closeSocket(socket);
+        return;
+    }
+
+    const xc::BreakpointSetResponse response = xc::parseBreakpointSetResponse(responseLine);
+    if (slot < 4) {
+        s.breakpoints[slot] = response;
+    }
+    s.connected = true;
+    s.hello = hello;
+    s.helloOk = true;
+    s.lastError = response.ok ? "" : response.error;
+    s.lastAction = response.ok ? response.message : "下断失败: " + response.error;
+    closeSocket(socket);
+}
+
 void disconnectAgent() {
     ClientState& s = state();
     s.connected = false;
     s.helloOk = false;
     s.hello = {};
     s.driver = {};
+    for (auto& breakpoint : s.breakpoints) {
+        breakpoint = {};
+    }
     s.lastError = "已断开";
     s.lastAction = "已断开连接";
 }
@@ -258,6 +314,13 @@ void panel(eui::Ui& ui, const std::string& id, float x, float y, float w, float 
     rect(ui, id, x, y, w, h, kPanel, kLine);
     fillRect(ui, id + ".header", x, y, w, 26.0f, kHeader);
     text(ui, id + ".title", x + 10.0f, y + 4.0f, title, kText, 15.0f);
+}
+
+std::string breakpointSlotLine(std::uint32_t slot, const xc::BreakpointSetResponse& bp) {
+    if (!bp.ok) {
+        return std::to_string(slot) + "  -     -           空";
+    }
+    return std::to_string(slot) + "  " + bp.type + "  " + xc::hexAddress(bp.address) + "  开启";
 }
 
 std::vector<std::string> registerLines() {
@@ -329,7 +392,8 @@ void compose(eui::Ui& ui, const eui::Screen& screen) {
     button(ui, "connect", 220.0f, 34.0f, 62.0f, "连接", [] { connectAndProbeAgent(); });
     button(ui, "disconnect", 288.0f, 34.0f, 62.0f, "断开", [] { disconnectAgent(); });
     button(ui, "probe", 356.0f, 34.0f, 86.0f, "检测驱动", [] { connectAndProbeAgent(); });
-    text(ui, "server.status", 462.0f, 38.0f, std::string("服务器状态: ") + (client.connected ? "已连接" : "未连接") + "  端口: " + std::to_string(xc::kDefaultAgentPort), client.connected ? kCyan : kRed, 13.0f);
+    button(ui, "bp.set0", 448.0f, 34.0f, 76.0f, "下断S0", [] { setBreakpointSlot(0); });
+    text(ui, "server.status", 544.0f, 38.0f, std::string("服务器状态: ") + (client.connected ? "已连接" : "未连接") + "  端口: " + std::to_string(xc::kDefaultAgentPort), client.connected ? kCyan : kRed, 13.0f);
     text(ui, "data.count", width - 110.0f, 38.0f, "数据: 0条", kMuted, 13.0f);
 
     rect(ui, "sessionbar", 0.0f, 62.0f, width, 32.0f, kToolbar, kLine);
@@ -350,12 +414,12 @@ void compose(eui::Ui& ui, const eui::Screen& screen) {
     panel(ui, "slots", margin, 250.0f, leftWidth, 220.0f, "硬件断点槽");
     mono(ui, "slots.header", 16.0f, 284.0f, "#  类型  地址        状态", kMuted, 12.0f);
     fillRect(ui, "slots.sel", margin + 2.0f, 296.0f, leftWidth - 4.0f, 20.0f, kSelect);
-    mono(ui, "slots.0", 16.0f, 299.0f, "0  -     -           空", kText, 13.0f);
-    mono(ui, "slots.1", 16.0f, 323.0f, "1  -     -           空", kMuted, 13.0f);
-    mono(ui, "slots.2", 16.0f, 347.0f, "2  -     -           空", kMuted, 13.0f);
-    mono(ui, "slots.3", 16.0f, 371.0f, "3  -     -           空", kMuted, 13.0f);
-    mono(ui, "slots.note", 16.0f, 414.0f, "当前版本只显示状态", kYellow, 12.0f);
-    mono(ui, "slots.note2", 16.0f, 436.0f, "真实下断功能待接入", kYellow, 12.0f);
+    mono(ui, "slots.0", 16.0f, 299.0f, breakpointSlotLine(0, client.breakpoints[0]), client.breakpoints[0].ok ? kCyan : kText, 13.0f);
+    mono(ui, "slots.1", 16.0f, 323.0f, breakpointSlotLine(1, client.breakpoints[1]), client.breakpoints[1].ok ? kCyan : kMuted, 13.0f);
+    mono(ui, "slots.2", 16.0f, 347.0f, breakpointSlotLine(2, client.breakpoints[2]), client.breakpoints[2].ok ? kCyan : kMuted, 13.0f);
+    mono(ui, "slots.3", 16.0f, 371.0f, breakpointSlotLine(3, client.breakpoints[3]), client.breakpoints[3].ok ? kCyan : kMuted, 13.0f);
+    mono(ui, "slots.note", 16.0f, 414.0f, "下断地址: " + xc::hexAddress(client.breakpointAddress), kYellow, 12.0f);
+    mono(ui, "slots.note2", 16.0f, 436.0f, "顶部按钮写入 slot0", kYellow, 12.0f);
 
     panel(ui, "driver", margin, 478.0f, leftWidth, 150.0f, "驱动状态");
     text(ui, "driver.loaded", 16.0f, 514.0f, std::string("lsdriver: ") + (client.driver.moduleLoaded ? "已加载" : "未加载"), client.driver.moduleLoaded ? kCyan : kYellow, 13.0f);

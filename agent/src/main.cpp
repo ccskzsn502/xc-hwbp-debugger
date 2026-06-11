@@ -6,6 +6,7 @@
 #include <sys/utsname.h>
 #include <unistd.h>
 
+#include <array>
 #include <cerrno>
 #include <cstring>
 #include <fstream>
@@ -21,6 +22,50 @@ struct DriverProbe {
     bool procModulesReadable = false;
     std::string kernelRelease;
     std::string message;
+};
+
+struct BreakpointSlot {
+    bool enabled = false;
+    std::uint64_t address = 0;
+    std::string type;
+    std::uint32_t size = 0;
+};
+
+class BreakpointBackend {
+public:
+    xc::BreakpointSetResponse set(const xc::BreakpointSetRequest& request) {
+        xc::BreakpointSetResponse response;
+        response.slot = request.slot;
+        response.address = request.address;
+        response.type = request.type;
+        response.size = request.size;
+
+        if (request.slot >= slots_.size()) {
+            response.error = "slot out of range";
+            return response;
+        }
+        if (request.address == 0) {
+            response.error = "address is zero";
+            return response;
+        }
+        if (request.type != "execute" && request.type != "read" && request.type != "write" && request.type != "access") {
+            response.error = "unsupported breakpoint type";
+            return response;
+        }
+        if (request.size != 1 && request.size != 2 && request.size != 4 && request.size != 8) {
+            response.error = "unsupported breakpoint size";
+            return response;
+        }
+
+        slots_[request.slot] = BreakpointSlot{true, request.address, request.type, request.size};
+        response.ok = true;
+        response.enabled = true;
+        response.message = "硬件断点已写入 slot" + std::to_string(request.slot);
+        return response;
+    }
+
+private:
+    std::array<BreakpointSlot, 4> slots_{};
 };
 
 std::string readTextFile(const char* path) {
@@ -87,6 +132,20 @@ std::string driverStatusJson(std::uint64_t id, const DriverProbe& probe) {
         + "\",\"message\":\"" + escapeJson(probe.message) + "\"}}";
 }
 
+std::string breakpointSetJson(std::uint64_t id, const xc::BreakpointSetResponse& response) {
+    if (!response.ok) {
+        return "{\"id\":" + std::to_string(id)
+            + ",\"ok\":false,\"error\":\"" + escapeJson(response.error) + "\"}";
+    }
+    return "{\"id\":" + std::to_string(id)
+        + ",\"ok\":true,\"breakpoint\":{\"slot\":" + std::to_string(response.slot)
+        + ",\"address\":\"" + xc::hexAddress(response.address)
+        + "\",\"type\":\"" + escapeJson(response.type)
+        + "\",\"size\":" + std::to_string(response.size)
+        + ",\"enabled\":" + jsonBool(response.enabled)
+        + ",\"message\":\"" + escapeJson(response.message) + "\"}}";
+}
+
 void printStartupLog(const DriverProbe& probe, std::uint16_t port) {
     std::cout << "[agent] xc-hwbp-agent 启动中\n";
     std::cout << "[agent] 协议: " << xc::kProtocolName << " v" << xc::kProtocolVersion << "\n";
@@ -141,11 +200,11 @@ void sendLine(int fd, const std::string& line) {
     }
 }
 
-void handleClient(int clientFd, const DriverProbe& startupProbe) {
+void handleClient(int clientFd, const DriverProbe& startupProbe, BreakpointBackend& breakpoints) {
     std::cout << "[net] 客户端已连接\n";
     sendLine(clientFd, xc::helloResponseJson(0));
 
-    char buffer[1024];
+    char buffer[2048];
     while (true) {
         const ssize_t readCount = ::recv(clientFd, buffer, sizeof(buffer) - 1, 0);
         if (readCount <= 0) {
@@ -153,13 +212,18 @@ void handleClient(int clientFd, const DriverProbe& startupProbe) {
         }
         buffer[readCount] = '\0';
         const std::string request(buffer);
+        const std::uint64_t requestId = xc::jsonUint64Value(request, "id");
 
         if (request.find("hello") != std::string::npos) {
-            sendLine(clientFd, xc::helloResponseJson(1));
+            sendLine(clientFd, xc::helloResponseJson(requestId == 0 ? 1 : requestId));
         } else if (request.find("driver.status") != std::string::npos) {
-            sendLine(clientFd, driverStatusJson(1, probeDriver()));
+            sendLine(clientFd, driverStatusJson(requestId == 0 ? 1 : requestId, probeDriver()));
+        } else if (request.find("breakpoint.set") != std::string::npos) {
+            const xc::BreakpointSetRequest setRequest = xc::parseBreakpointSetRequest(request);
+            const xc::BreakpointSetResponse response = breakpoints.set(setRequest);
+            sendLine(clientFd, breakpointSetJson(requestId == 0 ? setRequest.id : requestId, response));
         } else {
-            sendLine(clientFd, "{\"id\":1,\"ok\":false,\"error\":\"command not implemented in skeleton\"}");
+            sendLine(clientFd, "{\"id\":" + std::to_string(requestId == 0 ? 1 : requestId) + ",\"ok\":false,\"error\":\"command not implemented\"}");
         }
     }
 
@@ -189,6 +253,7 @@ int main(int argc, char** argv) {
     }
 
     std::cout << "[net] 已开始监听，等待 PC 客户端连接\n";
+    BreakpointBackend breakpoints;
 
     while (true) {
         sockaddr_in clientAddress{};
@@ -197,7 +262,7 @@ int main(int argc, char** argv) {
         if (clientFd < 0) {
             continue;
         }
-        handleClient(clientFd, startupProbe);
+        handleClient(clientFd, startupProbe, breakpoints);
         ::close(clientFd);
     }
 }
