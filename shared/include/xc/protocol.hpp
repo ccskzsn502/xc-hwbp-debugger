@@ -75,6 +75,7 @@ struct BreakpointSetRequest {
     std::uint64_t address = 0;
     std::string type;
     std::uint32_t size = 0;
+    std::string target;
 };
 
 struct BreakpointSetResponse {
@@ -210,6 +211,7 @@ inline BreakpointSetRequest parseBreakpointSetRequest(std::string_view json) {
     request.address = jsonUint64Value(json, "address");
     request.type = jsonStringValue(json, "type");
     request.size = jsonUint32Value(json, "size");
+    request.target = jsonStringValue(json, "target");
     return request;
 }
 
@@ -234,12 +236,17 @@ inline std::string driverStatusRequestJson(std::uint64_t id) {
     return "{\"id\":" + std::to_string(id) + ",\"cmd\":\"driver.status\"}";
 }
 
-inline std::string breakpointSetRequestJson(std::uint64_t id, std::uint32_t slot, std::uint64_t address, std::string_view type, std::uint32_t size) {
-    return "{\"id\":" + std::to_string(id)
+inline std::string breakpointSetRequestJson(std::uint64_t id, std::uint32_t slot, std::uint64_t address, std::string_view type, std::uint32_t size, std::string_view target = {}) {
+    std::string out = "{\"id\":" + std::to_string(id)
         + ",\"cmd\":\"breakpoint.set\",\"slot\":" + std::to_string(slot)
         + ",\"address\":\"" + hexAddress(address)
         + "\",\"type\":\"" + std::string(type)
-        + "\",\"size\":" + std::to_string(size) + "}";
+        + "\",\"size\":" + std::to_string(size);
+    if (!target.empty()) {
+        out += ",\"target\":\"" + std::string(target) + "\"";
+    }
+    out += "}";
+    return out;
 }
 
 inline std::string helloResponseJson(std::uint64_t id) {
