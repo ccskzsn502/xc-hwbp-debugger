@@ -15,3 +15,7 @@ add_executable(xc-hwbp-debugger
 
 target_link_libraries(xc-hwbp-debugger PRIVATE xc_shared eui::neo)
 eui_neo_configure_app(xc-hwbp-debugger)
+
+if(WIN32)
+    target_link_libraries(xc-hwbp-debugger PRIVATE ws2_32)
+endif()
