@@ -8,24 +8,6 @@ on:
   workflow_dispatch:
 
 jobs:
-  pc-linux:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - name: Install dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y ninja-build libx11-dev libxrandr-dev libxinerama-dev libxcursor-dev libxi-dev libgl1-mesa-dev libcurl4-openssl-dev
-      - name: Configure
-        run: cmake -S . -B build-pc -G Ninja -DXC_BUILD_AGENT=OFF -DXC_BUILD_PC_CLIENT=ON -DEUI_BUILD_APPS=OFF -DGLFW_BUILD_WAYLAND=OFF
-      - name: Build
-        run: cmake --build build-pc --parallel
-      - name: Upload PC Linux artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: xc-hwbp-debugger-linux
-          path: build-pc/pc-client/xc-hwbp-debugger
-
   pc-windows:
     runs-on: windows-latest
     steps:
