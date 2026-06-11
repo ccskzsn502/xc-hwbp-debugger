@@ -20,11 +20,25 @@ jobs:
         run: cmake -S . -B build-pc -G Ninja -DXC_BUILD_AGENT=OFF -DXC_BUILD_PC_CLIENT=ON -DEUI_BUILD_APPS=OFF -DGLFW_BUILD_WAYLAND=OFF
       - name: Build
         run: cmake --build build-pc --parallel
-      - name: Upload PC artifact
+      - name: Upload PC Linux artifact
         uses: actions/upload-artifact@v4
         with:
           name: xc-hwbp-debugger-linux
           path: build-pc/pc-client/xc-hwbp-debugger
+
+  pc-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure
+        run: cmake -S . -B build-win -DXC_BUILD_AGENT=OFF -DXC_BUILD_PC_CLIENT=ON -DEUI_BUILD_APPS=OFF -DGLFW_BUILD_WAYLAND=OFF
+      - name: Build
+        run: cmake --build build-win --config Release --parallel
+      - name: Upload PC Windows artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: xc-hwbp-debugger-windows-exe
+          path: build-win/pc-client/Release/xc-hwbp-debugger.exe
 
   android-agent:
     runs-on: ubuntu-latest
@@ -40,6 +54,11 @@ jobs:
             -DXC_BUILD_PC_CLIENT=OFF
       - name: Build Android agent
         run: cmake --build build-agent --parallel
+      - name: Verify Android agent artifact
+        run: |
+          file build-agent/agent/xc-hwbp-agent
+          ls -lh build-agent/agent/xc-hwbp-agent
+          strings build-agent/agent/xc-hwbp-agent | grep -E "lsdriver|driver.status|/proc/modules|xc-hwbp-agent"
       - name: Upload agent artifact
         uses: actions/upload-artifact@v4
         with:
