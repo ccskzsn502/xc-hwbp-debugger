@@ -48,11 +48,11 @@ DriverProbe probeDriver() {
     probe.moduleLoaded = modules.find("lsdriver") != std::string::npos;
 
     if (!probe.procModulesReadable) {
-        probe.message = "cannot read /proc/modules; run as root or check SELinux policy";
+        probe.message = "无法读取 /proc/modules，请确认已使用 root 权限运行，或检查 SELinux 策略";
     } else if (!probe.moduleLoaded) {
-        probe.message = "lsdriver module not found in /proc/modules";
+        probe.message = "未在 /proc/modules 中找到 lsdriver 驱动模块";
     } else {
-        probe.message = "lsdriver module is loaded";
+        probe.message = "lsdriver 驱动模块已加载";
     }
 
     return probe;
@@ -88,15 +88,15 @@ std::string driverStatusJson(std::uint64_t id, const DriverProbe& probe) {
 }
 
 void printStartupLog(const DriverProbe& probe, std::uint16_t port) {
-    std::cout << "[agent] xc-hwbp-agent starting\n";
-    std::cout << "[agent] protocol: " << xc::kProtocolName << " v" << xc::kProtocolVersion << "\n";
-    std::cout << "[agent] listen: 0.0.0.0:" << port << "\n";
-    std::cout << "[agent] kernel: " << probe.kernelRelease << "\n";
-    std::cout << "[driver] /proc/modules readable: " << (probe.procModulesReadable ? "yes" : "no") << "\n";
-    std::cout << "[driver] lsdriver loaded: " << (probe.moduleLoaded ? "yes" : "no") << "\n";
-    std::cout << "[driver] status: " << probe.message << "\n";
+    std::cout << "[agent] xc-hwbp-agent 启动中\n";
+    std::cout << "[agent] 协议: " << xc::kProtocolName << " v" << xc::kProtocolVersion << "\n";
+    std::cout << "[agent] 监听地址: 0.0.0.0:" << port << "\n";
+    std::cout << "[agent] 内核版本: " << probe.kernelRelease << "\n";
+    std::cout << "[driver] /proc/modules 可读取: " << (probe.procModulesReadable ? "是" : "否") << "\n";
+    std::cout << "[driver] lsdriver 已加载: " << (probe.moduleLoaded ? "是" : "否") << "\n";
+    std::cout << "[driver] 状态: " << probe.message << "\n";
     if (!probe.moduleLoaded) {
-        std::cout << "[driver] hint: insmod lsdriver.ko before using hardware breakpoints\n";
+        std::cout << "[driver] 提示: 请先执行 insmod lsdriver.ko，驱动加载成功后再启动本 agent\n";
     }
 }
 
@@ -142,7 +142,7 @@ void sendLine(int fd, const std::string& line) {
 }
 
 void handleClient(int clientFd, const DriverProbe& startupProbe) {
-    std::cout << "[net] client connected\n";
+    std::cout << "[net] 客户端已连接\n";
     sendLine(clientFd, xc::helloResponseJson(0));
 
     char buffer[1024];
@@ -164,7 +164,7 @@ void handleClient(int clientFd, const DriverProbe& startupProbe) {
     }
 
     (void)startupProbe;
-    std::cout << "[net] client disconnected\n";
+    std::cout << "[net] 客户端已断开\n";
 }
 
 } // namespace
@@ -177,14 +177,18 @@ int main(int argc, char** argv) {
 
     const DriverProbe startupProbe = probeDriver();
     printStartupLog(startupProbe, port);
+    if (!startupProbe.moduleLoaded) {
+        std::cerr << "[driver] 致命错误: 未检测到 lsdriver，agent 退出，不启动网络监听\n";
+        return 2;
+    }
 
     const int serverFd = createServer(port);
     if (serverFd < 0) {
-        std::cerr << "[net] failed to listen on port " << port << ": " << std::strerror(errno) << "\n";
+        std::cerr << "[net] 监听端口失败 " << port << ": " << std::strerror(errno) << "\n";
         return 1;
     }
 
-    std::cout << "[net] listening, waiting for PC client\n";
+    std::cout << "[net] 已开始监听，等待 PC 客户端连接\n";
 
     while (true) {
         sockaddr_in clientAddress{};
