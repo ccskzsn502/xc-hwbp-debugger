@@ -1,0 +1,47 @@
+name: Build
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+  workflow_dispatch:
+
+jobs:
+  pc-linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ninja-build libx11-dev libxrandr-dev libxinerama-dev libxcursor-dev libxi-dev libgl1-mesa-dev libcurl4-openssl-dev
+      - name: Configure
+        run: cmake -S . -B build-pc -G Ninja -DXC_BUILD_AGENT=OFF -DXC_BUILD_PC_CLIENT=ON -DEUI_BUILD_APPS=OFF -DGLFW_BUILD_WAYLAND=OFF
+      - name: Build
+        run: cmake --build build-pc --parallel
+      - name: Upload PC artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: xc-hwbp-debugger-linux
+          path: build-pc/pc-client/xc-hwbp-debugger
+
+  android-agent:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure Android agent
+        run: |
+          cmake -S . -B build-agent \
+            -DCMAKE_TOOLCHAIN_FILE=$ANDROID_NDK_HOME/build/cmake/android.toolchain.cmake \
+            -DANDROID_ABI=arm64-v8a \
+            -DANDROID_PLATFORM=android-29 \
+            -DXC_BUILD_AGENT=ON \
+            -DXC_BUILD_PC_CLIENT=OFF
+      - name: Build Android agent
+        run: cmake --build build-agent --parallel
+      - name: Upload agent artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: xc-hwbp-agent-android-arm64
+          path: build-agent/agent/xc-hwbp-agent
