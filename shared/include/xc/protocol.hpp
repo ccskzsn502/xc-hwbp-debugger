@@ -49,6 +49,8 @@ inline Command commandFromString(std::string_view value) {
     return Command::Unknown;
 }
 
+
+
 struct HelloResponse {
     bool ok = false;
     std::string name;

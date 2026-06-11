@@ -2,8 +2,25 @@
 #include "xc/protocol.hpp"
 
 #include <algorithm>
+#include <array>
+#include <cerrno>
+#include <cstdint>
+#include <cstring>
 #include <string>
 #include <vector>
+
+#ifdef _WIN32
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <winsock2.h>
+#include <ws2tcpip.h>
+#else
+#include <arpa/inet.h>
+#include <netinet/in.h>
+#include <sys/socket.h>
+#include <unistd.h>
+#endif
 
 namespace app {
 namespace {
@@ -45,8 +62,195 @@ void mono(eui::Ui& ui, const std::string& id, float x, float y, const std::strin
     ui.text(id).position(x, y).text(value).fontSize(size).fontFamily("Consolas").color(color).build();
 }
 
-void button(eui::Ui& ui, const std::string& id, float x, float y, float w, const std::string& label) {
-    rect(ui, id + ".bg", x, y, w, 22.0f, kButton, kLine);
+struct ClientState {
+    bool connected = false;
+    bool helloOk = false;
+    xc::HelloResponse hello;
+    xc::DriverStatusResponse driver;
+    std::string endpoint = "192.168.1.10";
+    std::string lastError = "未连接";
+    std::string lastAction = "就绪: 等待连接手机 agent";
+    std::uint64_t requestId = 1;
+};
+
+ClientState& state() {
+    static ClientState value;
+    return value;
+}
+
+#ifdef _WIN32
+using SocketHandle = SOCKET;
+constexpr SocketHandle kInvalidSocket = INVALID_SOCKET;
+void closeSocket(SocketHandle socket) { closesocket(socket); }
+#else
+using SocketHandle = int;
+constexpr SocketHandle kInvalidSocket = -1;
+void closeSocket(SocketHandle socket) { ::close(socket); }
+#endif
+
+bool ensureSocketRuntime(std::string& error) {
+#ifdef _WIN32
+    static bool initialized = false;
+    if (!initialized) {
+        WSADATA data{};
+        if (WSAStartup(MAKEWORD(2, 2), &data) != 0) {
+            error = "WSAStartup 初始化失败";
+            return false;
+        }
+        initialized = true;
+    }
+#else
+    (void)error;
+#endif
+    return true;
+}
+
+bool sendAll(SocketHandle socket, const std::string& data) {
+    const char* ptr = data.data();
+    std::size_t remaining = data.size();
+    while (remaining > 0) {
+#ifdef _WIN32
+        const int sent = ::send(socket, ptr, static_cast<int>(remaining), 0);
+#else
+        const ssize_t sent = ::send(socket, ptr, remaining, 0);
+#endif
+        if (sent <= 0) {
+            return false;
+        }
+        ptr += sent;
+        remaining -= static_cast<std::size_t>(sent);
+    }
+    return true;
+}
+
+bool sendLine(SocketHandle socket, const std::string& line) {
+    return sendAll(socket, line + "\n");
+}
+
+std::string receiveLine(SocketHandle socket, std::string& error) {
+    std::string line;
+    std::array<char, 1> ch{};
+    while (line.size() < 64 * 1024) {
+#ifdef _WIN32
+        const int received = ::recv(socket, ch.data(), 1, 0);
+#else
+        const ssize_t received = ::recv(socket, ch.data(), 1, 0);
+#endif
+        if (received <= 0) {
+            error = line.empty() ? "连接已关闭，未收到响应" : "连接已关闭，响应不完整";
+            return {};
+        }
+        if (ch[0] == '\n') {
+            return line;
+        }
+        if (ch[0] != '\r') {
+            line.push_back(ch[0]);
+        }
+    }
+    error = "响应超过 64KB，协议异常";
+    return {};
+}
+
+SocketHandle connectSocket(const std::string& host, std::uint16_t port, std::string& error) {
+    if (!ensureSocketRuntime(error)) {
+        return kInvalidSocket;
+    }
+
+    SocketHandle socketFd = ::socket(AF_INET, SOCK_STREAM, 0);
+    if (socketFd == kInvalidSocket) {
+        error = "创建 socket 失败";
+        return kInvalidSocket;
+    }
+
+    sockaddr_in address{};
+    address.sin_family = AF_INET;
+    address.sin_port = htons(port);
+    if (::inet_pton(AF_INET, host.c_str(), &address.sin_addr) != 1) {
+        error = "IP 地址格式无效: " + host;
+        closeSocket(socketFd);
+        return kInvalidSocket;
+    }
+
+    if (::connect(socketFd, reinterpret_cast<sockaddr*>(&address), sizeof(address)) != 0) {
+        error = "连接失败: " + host + ":" + std::to_string(port);
+        closeSocket(socketFd);
+        return kInvalidSocket;
+    }
+
+    return socketFd;
+}
+
+void connectAndProbeAgent() {
+    ClientState& s = state();
+    s.lastAction = "正在连接 " + s.endpoint + ":" + std::to_string(xc::kDefaultAgentPort);
+    s.connected = false;
+    s.helloOk = false;
+    s.driver = {};
+    s.hello = {};
+
+    std::string error;
+    const SocketHandle socket = connectSocket(s.endpoint, xc::kDefaultAgentPort, error);
+    if (socket == kInvalidSocket) {
+        s.lastError = error;
+        s.lastAction = "连接失败: " + error;
+        return;
+    }
+
+    const std::string helloLine = receiveLine(socket, error);
+    if (helloLine.empty()) {
+        s.lastError = error;
+        s.lastAction = "连接失败: " + error;
+        closeSocket(socket);
+        return;
+    }
+
+    s.hello = xc::parseHelloResponse(helloLine);
+    s.helloOk = s.hello.ok && s.hello.protocol == xc::kProtocolName && s.hello.version == xc::kProtocolVersion;
+    if (!s.helloOk) {
+        s.lastError = "Agent hello 不匹配: " + helloLine;
+        s.lastAction = "协议握手失败";
+        closeSocket(socket);
+        return;
+    }
+
+    if (!sendLine(socket, xc::driverStatusRequestJson(s.requestId++))) {
+        s.lastError = "发送 driver.status 失败";
+        s.lastAction = "驱动检测请求失败";
+        closeSocket(socket);
+        return;
+    }
+
+    const std::string statusLine = receiveLine(socket, error);
+    if (statusLine.empty()) {
+        s.lastError = error;
+        s.lastAction = "驱动检测失败: " + error;
+        closeSocket(socket);
+        return;
+    }
+
+    s.driver = xc::parseDriverStatusResponse(statusLine);
+    s.connected = true;
+    s.lastError.clear();
+    s.lastAction = s.driver.ok ? "已连接 Agent，驱动状态已刷新" : "已连接 Agent，但驱动状态返回错误";
+    closeSocket(socket);
+}
+
+void disconnectAgent() {
+    ClientState& s = state();
+    s.connected = false;
+    s.helloOk = false;
+    s.hello = {};
+    s.driver = {};
+    s.lastError = "已断开";
+    s.lastAction = "已断开连接";
+}
+
+void button(eui::Ui& ui, const std::string& id, float x, float y, float w, const std::string& label, std::function<void()> onClick = {}) {
+    auto builder = ui.rect(id + ".bg").position(x, y).size(w, 22.0f).color(kButton).border(1.0f, kLine);
+    if (onClick) {
+        builder.onClick(std::move(onClick));
+    }
+    builder.build();
     text(ui, id + ".label", x + 14.0f, y + 3.0f, label, kText, 13.0f);
 }
 
@@ -120,16 +324,20 @@ void compose(eui::Ui& ui, const eui::Screen& screen) {
 
     rect(ui, "topbar", 0.0f, 28.0f, width, 34.0f, kTopbar, kLine);
     rect(ui, "endpoint.input", 18.0f, 35.0f, 180.0f, 20.0f, kInput, kLine);
-    text(ui, "endpoint.input.text", 28.0f, 38.0f, "192.168.1.10", kText, 13.0f);
-    button(ui, "connect", 220.0f, 34.0f, 62.0f, "连接");
-    button(ui, "disconnect", 288.0f, 34.0f, 62.0f, "断开");
-    button(ui, "probe", 356.0f, 34.0f, 86.0f, "检测驱动");
-    text(ui, "server.status", 462.0f, 38.0f, "服务器状态: 未连接  端口: " + std::to_string(xc::kDefaultAgentPort), kRed, 13.0f);
+    ClientState& client = state();
+    text(ui, "endpoint.input.text", 28.0f, 38.0f, client.endpoint, kText, 13.0f);
+    button(ui, "connect", 220.0f, 34.0f, 62.0f, "连接", [] { connectAndProbeAgent(); });
+    button(ui, "disconnect", 288.0f, 34.0f, 62.0f, "断开", [] { disconnectAgent(); });
+    button(ui, "probe", 356.0f, 34.0f, 86.0f, "检测驱动", [] { connectAndProbeAgent(); });
+    text(ui, "server.status", 462.0f, 38.0f, std::string("服务器状态: ") + (client.connected ? "已连接" : "未连接") + "  端口: " + std::to_string(xc::kDefaultAgentPort), client.connected ? kCyan : kRed, 13.0f);
     text(ui, "data.count", width - 110.0f, 38.0f, "数据: 0条", kMuted, 13.0f);
 
     rect(ui, "sessionbar", 0.0f, 62.0f, width, 32.0f, kToolbar, kLine);
-    text(ui, "session.info", 18.0f, 70.0f, "会话: 未附加目标进程", kMuted, 13.0f);
-    text(ui, "driver.info", 230.0f, 70.0f, "驱动: 未知  /proc/modules: 未检测  Agent: 离线", kYellow, 13.0f);
+    text(ui, "session.info", 18.0f, 70.0f, client.connected ? "会话: 已连接手机 Agent，未附加目标进程" : "会话: 未附加目标进程", client.connected ? kText : kMuted, 13.0f);
+    const std::string driverLine = "驱动: " + std::string(client.driver.moduleLoaded ? "已加载" : "未加载")
+        + "  /proc/modules: " + std::string(client.driver.procModulesReadable ? "可读" : "未确认")
+        + "  Agent: " + std::string(client.connected ? "在线" : "离线");
+    text(ui, "driver.info", 230.0f, 70.0f, driverLine, client.connected && client.driver.moduleLoaded ? kCyan : kYellow, 13.0f);
     text(ui, "protocol.info", 570.0f, 70.0f, "协议: " + std::string(xc::kProtocolName) + " v" + std::to_string(xc::kProtocolVersion), kCyan, 13.0f);
 
     panel(ui, "watch", margin, 102.0f, leftWidth, 140.0f, "监视断点");
@@ -150,14 +358,14 @@ void compose(eui::Ui& ui, const eui::Screen& screen) {
     mono(ui, "slots.note2", 16.0f, 436.0f, "真实下断功能待接入", kYellow, 12.0f);
 
     panel(ui, "driver", margin, 478.0f, leftWidth, 150.0f, "驱动状态");
-    text(ui, "driver.loaded", 16.0f, 514.0f, "lsdriver: 未检测", kYellow, 13.0f);
-    text(ui, "driver.modules", 16.0f, 540.0f, "模块表: 未读取", kMuted, 13.0f);
-    text(ui, "driver.agent", 16.0f, 566.0f, "Agent: 未连接", kRed, 13.0f);
+    text(ui, "driver.loaded", 16.0f, 514.0f, std::string("lsdriver: ") + (client.driver.moduleLoaded ? "已加载" : "未加载"), client.driver.moduleLoaded ? kCyan : kYellow, 13.0f);
+    text(ui, "driver.modules", 16.0f, 540.0f, std::string("模块表: ") + (client.driver.procModulesReadable ? "可读取" : "未确认"), client.driver.procModulesReadable ? kText : kMuted, 13.0f);
+    text(ui, "driver.agent", 16.0f, 566.0f, std::string("Agent: ") + (client.connected ? "在线" : "未连接"), client.connected ? kCyan : kRed, 13.0f);
     mono(ui, "driver.rule", 16.0f, 598.0f, "策略: 缺驱动则退出", kYellow, 12.0f);
 
     panel(ui, "main", mainX, 102.0f, mainW, mainH, "数据视图");
-    mono(ui, "main.thread", mainX + 14.0f, 132.0f, "Tid : - | Pid : - | 当前没有连接到手机 agent", kText, 14.0f);
-    mono(ui, "main.note", mainX + 14.0f, 154.0f, "这里显示断点命中后的寄存器、DEC/HEX、模块偏移、堆栈。当前是静态预览数据。", kMuted, 13.0f);
+    mono(ui, "main.thread", mainX + 14.0f, 132.0f, client.connected ? "Tid : - | Pid : - | Agent 已连接，等待真实断点命中数据" : "Tid : - | Pid : - | 当前没有连接到手机 agent", kText, 14.0f);
+    mono(ui, "main.note", mainX + 14.0f, 154.0f, client.connected ? ("Agent: " + client.hello.name + " | 内核: " + client.driver.kernelRelease + " | " + client.driver.message) : "这里显示断点命中后的寄存器、DEC/HEX、模块偏移、堆栈。当前是静态预览数据。", client.connected ? kCyan : kMuted, 13.0f);
 
     const auto lines = registerLines();
     float y = 182.0f;
@@ -176,7 +384,7 @@ void compose(eui::Ui& ui, const eui::Screen& screen) {
     mono(ui, "stack.1", mainX + 14.0f, height - 50.0f, "#1: 后续按 断点ID / TID / 调用栈签名 自动归类", kMuted, 13.0f);
 
     rect(ui, "statusbar", 0.0f, height - 30.0f, width, 30.0f, kToolbar, kLine);
-    mono(ui, "status.left", 12.0f, height - 21.0f, "就绪: GUI 已按简洁调试器布局重构", kYellow, 13.0f);
+    mono(ui, "status.left", 12.0f, height - 21.0f, client.lastAction, client.connected ? kCyan : kYellow, 13.0f);
     text(ui, "status.right", width - 330.0f, height - 21.0f, "Windows GUI | Android agent", kMuted, 13.0f);
 }
 

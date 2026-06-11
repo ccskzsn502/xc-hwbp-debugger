@@ -8,6 +8,17 @@ on:
   workflow_dispatch:
 
 jobs:
+  protocol-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure tests
+        run: cmake -S . -B build-tests -DXC_BUILD_AGENT=OFF -DXC_BUILD_PC_CLIENT=OFF -DXC_BUILD_TESTS=ON
+      - name: Build tests
+        run: cmake --build build-tests --parallel
+      - name: Run tests
+        run: ctest --test-dir build-tests --output-on-failure
+
   pc-windows:
     runs-on: windows-latest
     steps:
