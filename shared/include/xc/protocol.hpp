@@ -89,6 +89,20 @@ struct BreakpointSetResponse {
     std::string error;
 };
 
+struct BreakpointRemoveRequest {
+    std::uint64_t id = 0;
+    std::uint32_t slot = 0;
+    std::string target;
+};
+
+struct BreakpointRemoveResponse {
+    bool ok = false;
+    std::uint32_t slot = 0;
+    bool enabled = false;
+    std::string message;
+    std::string error;
+};
+
 inline bool containsJsonBool(std::string_view json, std::string_view key, bool expected) {
     const std::string pattern = "\"" + std::string(key) + "\":" + (expected ? "true" : "false");
     return json.find(pattern) != std::string_view::npos;
@@ -228,12 +242,44 @@ inline BreakpointSetResponse parseBreakpointSetResponse(std::string_view json) {
     return response;
 }
 
+inline BreakpointRemoveRequest parseBreakpointRemoveRequest(std::string_view json) {
+    BreakpointRemoveRequest request;
+    request.id = jsonUint64Value(json, "id");
+    request.slot = jsonUint32Value(json, "slot");
+    request.target = jsonStringValue(json, "target");
+    return request;
+}
+
+inline BreakpointRemoveResponse parseBreakpointRemoveResponse(std::string_view json) {
+    BreakpointRemoveResponse response;
+    response.ok = jsonBoolOrFalse(json, "ok");
+    response.slot = jsonUint32Value(json, "slot");
+    response.enabled = jsonBoolOrFalse(json, "enabled");
+    response.message = jsonStringValue(json, "message");
+    response.error = jsonStringValue(json, "error");
+    return response;
+}
+
 inline std::string helloRequestJson(std::uint64_t id) {
     return "{\"id\":" + std::to_string(id) + ",\"cmd\":\"hello\"}";
 }
 
 inline std::string driverStatusRequestJson(std::uint64_t id) {
     return "{\"id\":" + std::to_string(id) + ",\"cmd\":\"driver.status\"}";
+}
+
+inline std::string breakpointInfoRequestJson(std::uint64_t id) {
+    return "{\"id\":" + std::to_string(id) + ",\"cmd\":\"breakpoint.info\"}";
+}
+
+inline std::string breakpointRemoveRequestJson(std::uint64_t id, std::uint32_t slot, std::string_view target = {}) {
+    std::string out = "{\"id\":" + std::to_string(id)
+        + ",\"cmd\":\"breakpoint.remove\",\"slot\":" + std::to_string(slot);
+    if (!target.empty()) {
+        out += ",\"target\":\"" + std::string(target) + "\"";
+    }
+    out += "}";
+    return out;
 }
 
 inline std::string breakpointSetRequestJson(std::uint64_t id, std::uint32_t slot, std::uint64_t address, std::string_view type, std::uint32_t size, std::string_view target = {}) {

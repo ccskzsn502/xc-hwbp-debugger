@@ -282,12 +282,7 @@ public:
             response.error = error;
             return response;
         }
-        if (!ensureMapped()) {
-            response.error = lastError_;
-            return response;
-        }
-        if (!waitForDriver(kLsdriverConnectTimeoutMs)) {
-            response.error = "lsdriver did not attach shared memory at 0x2025827000";
+        if (!prepareTarget(request.target, response.error)) {
             return response;
         }
 
@@ -297,14 +292,6 @@ public:
         bpInfo_.points[request.slot].hit_addr = request.address;
         bpInfo_.points[request.slot].record_count = 0;
         slots_[request.slot] = BreakpointSlot{true, request.address, request.type, request.size};
-
-        req_->pid = 0;
-        std::memset(&req_->proc_info, 0, sizeof(req_->proc_info));
-        if (isDigits(request.target)) {
-            req_->pid = std::stoi(request.target);
-        } else {
-            std::snprintf(req_->proc_info.name, sizeof(req_->proc_info.name), "%s", request.target.c_str());
-        }
         req_->bp_info = bpInfo_;
 
         if (!commit(op_set_process_hwbp)) {
@@ -322,6 +309,65 @@ public:
         response.message = "lsdriver 已写入硬件断点 slot" + std::to_string(request.slot)
             + " target=" + request.target;
         return response;
+    }
+
+    xc::BreakpointRemoveResponse remove(const xc::BreakpointRemoveRequest& request) {
+        xc::BreakpointRemoveResponse response;
+        response.slot = request.slot;
+        if (request.slot >= kMaxBreakpointSlots) {
+            response.error = "slot out of range";
+            return response;
+        }
+        if (request.target.empty()) {
+            response.error = "target pid or process name is empty";
+            return response;
+        }
+        if (!prepareTarget(request.target, response.error)) {
+            return response;
+        }
+
+        bpInfo_.points[request.slot] = {};
+        bpInfo_.points[request.slot].bt = HWBP_BREAKPOINT_EMPTY;
+        slots_[request.slot] = {};
+        req_->bp_info = bpInfo_;
+
+        if (!commit(op_remove_process_hwbp)) {
+            response.error = lastError_;
+            return response;
+        }
+        if (req_->status != 0) {
+            response.error = "lsdriver op_remove_process_hwbp failed: " + std::to_string(req_->status);
+            return response;
+        }
+
+        bpInfo_ = req_->bp_info;
+        response.ok = true;
+        response.enabled = false;
+        response.message = "lsdriver 已删除硬件断点 slot" + std::to_string(request.slot)
+            + " target=" + request.target;
+        return response;
+    }
+
+    hwbp_info info(std::string& error) {
+        error.clear();
+        if (!ensureMapped()) {
+            error = lastError_;
+            return {};
+        }
+        if (!waitForDriver(kLsdriverConnectTimeoutMs)) {
+            error = "lsdriver did not attach shared memory at 0x2025827000";
+            return {};
+        }
+        if (!commit(op_brps_weps_info)) {
+            error = lastError_;
+            return {};
+        }
+        if (req_->status != 0) {
+            error = "lsdriver op_brps_weps_info failed: " + std::to_string(req_->status);
+            return {};
+        }
+        bpInfo_ = req_->bp_info;
+        return bpInfo_;
     }
 
 private:
@@ -377,6 +423,25 @@ private:
         return false;
     }
 
+    bool prepareTarget(const std::string& target, std::string& error) {
+        if (!ensureMapped()) {
+            error = lastError_;
+            return false;
+        }
+        if (!waitForDriver(kLsdriverConnectTimeoutMs)) {
+            error = "lsdriver did not attach shared memory at 0x2025827000";
+            return false;
+        }
+        req_->pid = 0;
+        std::memset(&req_->proc_info, 0, sizeof(req_->proc_info));
+        if (isDigits(target)) {
+            req_->pid = std::stoi(target);
+        } else {
+            std::snprintf(req_->proc_info.name, sizeof(req_->proc_info.name), "%s", target.c_str());
+        }
+        return true;
+    }
+
     std::string validate(const xc::BreakpointSetRequest& request) const {
         if (request.slot >= kMaxBreakpointSlots) {
             return "slot out of range";
@@ -426,7 +491,6 @@ std::string driverStatusJson(std::uint64_t id, const DriverProbe& probe) {
         + ",\"kernel_release\":\"" + escapeJson(probe.kernelRelease)
         + "\",\"message\":\"" + escapeJson(probe.message) + "\"}}";
 }
-
 std::string breakpointSetJson(std::uint64_t id, const xc::BreakpointSetResponse& response) {
     if (!response.ok) {
         return "{\"id\":" + std::to_string(id)
@@ -439,6 +503,38 @@ std::string breakpointSetJson(std::uint64_t id, const xc::BreakpointSetResponse&
         + "\",\"size\":" + std::to_string(response.size)
         + ",\"enabled\":" + jsonBool(response.enabled)
         + ",\"message\":\"" + escapeJson(response.message) + "\"}}";
+}
+
+std::string breakpointRemoveJson(std::uint64_t id, const xc::BreakpointRemoveResponse& response) {
+    if (!response.ok) {
+        return "{\"id\":" + std::to_string(id)
+            + ",\"ok\":false,\"error\":\"" + escapeJson(response.error) + "\"}";
+    }
+    return "{\"id\":" + std::to_string(id)
+        + ",\"ok\":true,\"breakpoint\":{\"slot\":" + std::to_string(response.slot)
+        + ",\"enabled\":" + jsonBool(response.enabled)
+        + ",\"message\":\"" + escapeJson(response.message) + "\"}}";
+}
+
+std::string breakpointInfoJson(std::uint64_t id, const hwbp_info& info) {
+    std::string out = "{\"id\":" + std::to_string(id)
+        + ",\"ok\":true,\"breakpoints\":{\"num_brps\":" + std::to_string(info.num_brps)
+        + ",\"num_wrps\":" + std::to_string(info.num_wrps)
+        + ",\"points\":[";
+    for (std::size_t i = 0; i < 16; ++i) {
+        if (i != 0) {
+            out += ",";
+        }
+        const hwbp_point& point = info.points[i];
+        out += "{\"slot\":" + std::to_string(i)
+            + ",\"type\":" + std::to_string(static_cast<int>(point.bt))
+            + ",\"size\":" + std::to_string(static_cast<int>(point.bl))
+            + ",\"address\":\"" + xc::hexAddress(point.hit_addr)
+            + "\",\"records\":" + std::to_string(point.record_count)
+            + "}";
+    }
+    out += "]}}";
+    return out;
 }
 
 void printStartupLog(const DriverProbe& probe, std::uint16_t port) {
@@ -507,10 +603,22 @@ void handleClient(int clientFd, LsdriverBackend& breakpoints) {
             sendLine(clientFd, xc::helloResponseJson(requestId == 0 ? 1 : requestId));
         } else if (request.find("driver.status") != std::string::npos) {
             sendLine(clientFd, driverStatusJson(requestId == 0 ? 1 : requestId, breakpoints.probe()));
+        } else if (request.find("breakpoint.info") != std::string::npos) {
+            std::string error;
+            const hwbp_info info = breakpoints.info(error);
+            if (error.empty()) {
+                sendLine(clientFd, breakpointInfoJson(requestId == 0 ? 1 : requestId, info));
+            } else {
+                sendLine(clientFd, "{\"id\":" + std::to_string(requestId == 0 ? 1 : requestId) + ",\"ok\":false,\"error\":\"" + escapeJson(error) + "\"}");
+            }
         } else if (request.find("breakpoint.set") != std::string::npos) {
             const xc::BreakpointSetRequest setRequest = xc::parseBreakpointSetRequest(request);
             const xc::BreakpointSetResponse response = breakpoints.set(setRequest);
             sendLine(clientFd, breakpointSetJson(requestId == 0 ? setRequest.id : requestId, response));
+        } else if (request.find("breakpoint.remove") != std::string::npos) {
+            const xc::BreakpointRemoveRequest removeRequest = xc::parseBreakpointRemoveRequest(request);
+            const xc::BreakpointRemoveResponse response = breakpoints.remove(removeRequest);
+            sendLine(clientFd, breakpointRemoveJson(requestId == 0 ? removeRequest.id : requestId, response));
         } else {
             sendLine(clientFd, "{\"id\":" + std::to_string(requestId == 0 ? 1 : requestId) + ",\"ok\":false,\"error\":\"command not implemented\"}");
         }

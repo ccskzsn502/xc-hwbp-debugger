@@ -70,6 +70,7 @@ struct ClientState {
     xc::DriverStatusResponse driver;
     xc::BreakpointSetResponse breakpoints[4];
     std::string endpoint = "192.168.1.10";
+    std::string target = "com.tencent.tmgp.sgame";
     std::uint64_t breakpointAddress = 0x78919CFF84ULL;
     std::string lastError = "未连接";
     std::string lastAction = "就绪: 等待连接手机 agent";
@@ -260,7 +261,7 @@ void setBreakpointSlot(std::uint32_t slot) {
     }
 
     const std::uint64_t requestId = s.requestId++;
-    const std::string request = xc::breakpointSetRequestJson(requestId, slot, s.breakpointAddress, "execute", 4);
+    const std::string request = xc::breakpointSetRequestJson(requestId, slot, s.breakpointAddress, "execute", 4, s.target);
     if (!sendLine(socket, request)) {
         s.lastError = "发送 breakpoint.set 失败";
         s.lastAction = "下断请求发送失败";
@@ -285,6 +286,56 @@ void setBreakpointSlot(std::uint32_t slot) {
     s.helloOk = true;
     s.lastError = response.ok ? "" : response.error;
     s.lastAction = response.ok ? response.message : "下断失败: " + response.error;
+    closeSocket(socket);
+}
+
+void removeBreakpointSlot(std::uint32_t slot) {
+    ClientState& s = state();
+    s.lastAction = "正在删除硬件断点 slot" + std::to_string(slot);
+
+    std::string error;
+    const SocketHandle socket = connectSocket(s.endpoint, xc::kDefaultAgentPort, error);
+    if (socket == kInvalidSocket) {
+        s.lastError = error;
+        s.lastAction = "删断失败: " + error;
+        return;
+    }
+
+    const std::string helloLine = receiveLine(socket, error);
+    const xc::HelloResponse hello = xc::parseHelloResponse(helloLine);
+    if (!hello.ok || hello.protocol != xc::kProtocolName || hello.version != xc::kProtocolVersion) {
+        s.lastError = helloLine.empty() ? error : "Agent hello 不匹配: " + helloLine;
+        s.lastAction = "删断失败: 协议握手失败";
+        closeSocket(socket);
+        return;
+    }
+
+    const std::uint64_t requestId = s.requestId++;
+    const std::string request = xc::breakpointRemoveRequestJson(requestId, slot, s.target);
+    if (!sendLine(socket, request)) {
+        s.lastError = "发送 breakpoint.remove 失败";
+        s.lastAction = "删断请求发送失败";
+        closeSocket(socket);
+        return;
+    }
+
+    const std::string responseLine = receiveLine(socket, error);
+    if (responseLine.empty()) {
+        s.lastError = error;
+        s.lastAction = "删断失败: " + error;
+        closeSocket(socket);
+        return;
+    }
+
+    const xc::BreakpointRemoveResponse response = xc::parseBreakpointRemoveResponse(responseLine);
+    if (response.ok && slot < 4) {
+        s.breakpoints[slot] = {};
+    }
+    s.connected = true;
+    s.hello = hello;
+    s.helloOk = true;
+    s.lastError = response.ok ? "" : response.error;
+    s.lastAction = response.ok ? response.message : "删断失败: " + response.error;
     closeSocket(socket);
 }
 
@@ -393,7 +444,8 @@ void compose(eui::Ui& ui, const eui::Screen& screen) {
     button(ui, "disconnect", 288.0f, 34.0f, 62.0f, "断开", [] { disconnectAgent(); });
     button(ui, "probe", 356.0f, 34.0f, 86.0f, "检测驱动", [] { connectAndProbeAgent(); });
     button(ui, "bp.set0", 448.0f, 34.0f, 76.0f, "下断S0", [] { setBreakpointSlot(0); });
-    text(ui, "server.status", 544.0f, 38.0f, std::string("服务器状态: ") + (client.connected ? "已连接" : "未连接") + "  端口: " + std::to_string(xc::kDefaultAgentPort), client.connected ? kCyan : kRed, 13.0f);
+    button(ui, "bp.remove0", 530.0f, 34.0f, 76.0f, "删断S0", [] { removeBreakpointSlot(0); });
+    text(ui, "server.status", 626.0f, 38.0f, std::string("服务器状态: ") + (client.connected ? "已连接" : "未连接") + "  端口: " + std::to_string(xc::kDefaultAgentPort), client.connected ? kCyan : kRed, 13.0f);
     text(ui, "data.count", width - 110.0f, 38.0f, "数据: 0条", kMuted, 13.0f);
 
     rect(ui, "sessionbar", 0.0f, 62.0f, width, 32.0f, kToolbar, kLine);
@@ -419,13 +471,13 @@ void compose(eui::Ui& ui, const eui::Screen& screen) {
     mono(ui, "slots.2", 16.0f, 347.0f, breakpointSlotLine(2, client.breakpoints[2]), client.breakpoints[2].ok ? kCyan : kMuted, 13.0f);
     mono(ui, "slots.3", 16.0f, 371.0f, breakpointSlotLine(3, client.breakpoints[3]), client.breakpoints[3].ok ? kCyan : kMuted, 13.0f);
     mono(ui, "slots.note", 16.0f, 414.0f, "下断地址: " + xc::hexAddress(client.breakpointAddress), kYellow, 12.0f);
-    mono(ui, "slots.note2", 16.0f, 436.0f, "顶部按钮写入 slot0", kYellow, 12.0f);
+    mono(ui, "slots.note2", 16.0f, 436.0f, "目标: " + client.target, kYellow, 12.0f);
 
     panel(ui, "driver", margin, 478.0f, leftWidth, 150.0f, "驱动状态");
     text(ui, "driver.loaded", 16.0f, 514.0f, std::string("lsdriver: ") + (client.driver.moduleLoaded ? "已加载" : "未加载"), client.driver.moduleLoaded ? kCyan : kYellow, 13.0f);
     text(ui, "driver.modules", 16.0f, 540.0f, std::string("模块表: ") + (client.driver.procModulesReadable ? "可读取" : "未确认"), client.driver.procModulesReadable ? kText : kMuted, 13.0f);
     text(ui, "driver.agent", 16.0f, 566.0f, std::string("Agent: ") + (client.connected ? "在线" : "未连接"), client.connected ? kCyan : kRed, 13.0f);
-    mono(ui, "driver.rule", 16.0f, 598.0f, "策略: 缺驱动则退出", kYellow, 12.0f);
+    mono(ui, "driver.rule", 16.0f, 598.0f, "策略: 共享内存握手判断在线", kYellow, 12.0f);
 
     panel(ui, "main", mainX, 102.0f, mainW, mainH, "数据视图");
     mono(ui, "main.thread", mainX + 14.0f, 132.0f, client.connected ? "Tid : - | Pid : - | Agent 已连接，等待真实断点命中数据" : "Tid : - | Pid : - | 当前没有连接到手机 agent", kText, 14.0f);
