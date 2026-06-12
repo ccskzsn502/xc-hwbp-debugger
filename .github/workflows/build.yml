@@ -31,9 +31,22 @@ jobs:
         shell: pwsh
         run: |
           $packageDir = "build-win/package/xc-hwbp-debugger-windows"
-          New-Item -ItemType Directory -Force -Path $packageDir | Out-Null
-          Copy-Item "build-win/pc-client/Release/xc-hwbp-debugger.exe" $packageDir
-          Get-ChildItem $packageDir | Format-Table Name,Length
+          cmake --install build-win --config Release --prefix $packageDir
+          $exe = Join-Path $packageDir "xc-hwbp-debugger.exe"
+          $assetsDir = Join-Path $packageDir "assets"
+          if (!(Test-Path -LiteralPath $exe)) {
+            throw "Missing installed Windows GUI executable."
+          }
+          if (!(Test-Path -LiteralPath $assetsDir)) {
+            throw "Missing installed EUI assets directory."
+          }
+          if (!(Get-ChildItem -LiteralPath $assetsDir -Filter "*.ttf" -File -ErrorAction SilentlyContinue)) {
+            throw "Missing installed TTF font assets."
+          }
+          if (!(Get-ChildItem -LiteralPath $assetsDir -Filter "*.otf" -File -ErrorAction SilentlyContinue)) {
+            throw "Missing installed OTF font assets."
+          }
+          Get-ChildItem -LiteralPath $packageDir -Recurse | Sort-Object FullName | Format-Table FullName,Length
       - name: Verify PC Windows artifact starts without VC runtime DLLs
         shell: pwsh
         run: |
