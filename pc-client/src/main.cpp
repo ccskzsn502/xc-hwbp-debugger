@@ -3,11 +3,15 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <cerrno>
 #include <cstdint>
 #include <cstring>
 #include <functional>
+#include <mutex>
+#include <sstream>
 #include <string>
+#include <thread>
 #include <vector>
 
 #ifdef _WIN32
@@ -72,6 +76,8 @@ struct ClientState {
     std::string endpoint = "192.168.1.10";
     std::string target = "com.tencent.tmgp.sgame";
     std::uint64_t breakpointAddress = 0x78919CFF84ULL;
+    std::string breakpointType = "execute";
+    std::uint32_t breakpointSize = 4;
     std::string lastError = "未连接";
     std::string lastAction = "就绪: 等待连接手机 agent";
     std::uint64_t requestId = 1;
@@ -80,6 +86,16 @@ struct ClientState {
 ClientState& state() {
     static ClientState value;
     return value;
+}
+
+std::mutex& stateMutex() {
+    static std::mutex value;
+    return value;
+}
+
+std::uint64_t nextRequestId() {
+    std::lock_guard<std::mutex> lock(stateMutex());
+    return state().requestId++;
 }
 
 #ifdef _WIN32
@@ -217,7 +233,7 @@ void connectAndProbeAgent() {
         return;
     }
 
-    if (!sendLine(socket, xc::driverStatusRequestJson(s.requestId++))) {
+    if (!sendLine(socket, xc::driverStatusRequestJson(nextRequestId()))) {
         s.lastError = "发送 driver.status 失败";
         s.lastAction = "驱动检测请求失败";
         closeSocket(socket);
@@ -260,8 +276,8 @@ void setBreakpointSlot(std::uint32_t slot) {
         return;
     }
 
-    const std::uint64_t requestId = s.requestId++;
-    const std::string request = xc::breakpointSetRequestJson(requestId, slot, s.breakpointAddress, "execute", 4, s.target);
+    const std::uint64_t requestId = nextRequestId();
+    const std::string request = xc::breakpointSetRequestJson(requestId, slot, s.breakpointAddress, s.breakpointType, s.breakpointSize, s.target);
     if (!sendLine(socket, request)) {
         s.lastError = "发送 breakpoint.set 失败";
         s.lastAction = "下断请求发送失败";
@@ -310,7 +326,7 @@ void removeBreakpointSlot(std::uint32_t slot) {
         return;
     }
 
-    const std::uint64_t requestId = s.requestId++;
+    const std::uint64_t requestId = nextRequestId();
     const std::string request = xc::breakpointRemoveRequestJson(requestId, slot, s.target);
     if (!sendLine(socket, request)) {
         s.lastError = "发送 breakpoint.remove 失败";
@@ -337,6 +353,139 @@ void removeBreakpointSlot(std::uint32_t slot) {
     s.lastError = response.ok ? "" : response.error;
     s.lastAction = response.ok ? response.message : "删断失败: " + response.error;
     closeSocket(socket);
+}
+
+std::string jsonEscape(const std::string& value);
+
+std::string queryBreakpointInfoRaw() {
+    ClientState& s = state();
+    s.lastAction = "正在查询硬件断点信息";
+
+    std::string error;
+    const SocketHandle socket = connectSocket(s.endpoint, xc::kDefaultAgentPort, error);
+    if (socket == kInvalidSocket) {
+        s.lastError = error;
+        s.lastAction = "查询断点失败: " + error;
+        return "{\"ok\":false,\"error\":\"" + jsonEscape(error) + "\"}";
+    }
+
+    const std::string helloLine = receiveLine(socket, error);
+    const xc::HelloResponse hello = xc::parseHelloResponse(helloLine);
+    if (!hello.ok || hello.protocol != xc::kProtocolName || hello.version != xc::kProtocolVersion) {
+        const std::string message = helloLine.empty() ? error : "Agent hello 不匹配: " + helloLine;
+        s.lastError = message;
+        s.lastAction = "查询断点失败: 协议握手失败";
+        closeSocket(socket);
+        return "{\"ok\":false,\"error\":\"" + jsonEscape(message) + "\"}";
+    }
+
+    if (!sendLine(socket, xc::breakpointInfoRequestJson(nextRequestId()))) {
+        s.lastError = "发送 breakpoint.info 失败";
+        s.lastAction = "查询断点请求发送失败";
+        closeSocket(socket);
+        return "{\"ok\":false,\"error\":\"发送 breakpoint.info 失败\"}";
+    }
+
+    const std::string responseLine = receiveLine(socket, error);
+    closeSocket(socket);
+    if (responseLine.empty()) {
+        s.lastError = error;
+        s.lastAction = "查询断点失败: " + error;
+        return "{\"ok\":false,\"error\":\"" + jsonEscape(error) + "\"}";
+    }
+
+    s.connected = true;
+    s.hello = hello;
+    s.helloOk = true;
+    s.lastError.clear();
+    s.lastAction = "硬件断点信息已刷新";
+    return responseLine;
+}
+
+
+std::string jsonEscape(const std::string& value) {
+    std::string out;
+    out.reserve(value.size());
+    for (char c : value) {
+        switch (c) {
+            case '\\': out += "\\\\"; break;
+            case '"': out += "\\\""; break;
+            case '\n': out += "\\n"; break;
+            case '\r': out += "\\r"; break;
+            case '\t': out += "\\t"; break;
+            default: out.push_back(c); break;
+        }
+    }
+    return out;
+}
+
+std::string boolJson(bool value) {
+    return value ? "true" : "false";
+}
+
+std::string stateJson() {
+    ClientState snapshot;
+    {
+        std::lock_guard<std::mutex> lock(stateMutex());
+        snapshot = state();
+    }
+
+    std::ostringstream out;
+    out << "{\"connected\":" << boolJson(snapshot.connected)
+        << ",\"hello_ok\":" << boolJson(snapshot.helloOk)
+        << ",\"endpoint\":\"" << jsonEscape(snapshot.endpoint) << "\""
+        << ",\"target\":\"" << jsonEscape(snapshot.target) << "\""
+        << ",\"breakpoint_address\":\"" << xc::hexAddress(snapshot.breakpointAddress) << "\""
+        << ",\"breakpoint_type\":\"" << jsonEscape(snapshot.breakpointType) << "\""
+        << ",\"breakpoint_size\":" << snapshot.breakpointSize
+        << ",\"last_action\":\"" << jsonEscape(snapshot.lastAction) << "\""
+        << ",\"last_error\":\"" << jsonEscape(snapshot.lastError) << "\""
+        << ",\"driver\":{\"module_loaded\":" << boolJson(snapshot.driver.moduleLoaded)
+        << ",\"proc_modules_readable\":" << boolJson(snapshot.driver.procModulesReadable)
+        << ",\"kernel_release\":\"" << jsonEscape(snapshot.driver.kernelRelease) << "\""
+        << ",\"message\":\"" << jsonEscape(snapshot.driver.message) << "\"}"
+        << ",\"breakpoints\":[";
+    for (std::size_t i = 0; i < 4; ++i) {
+        const auto& bp = snapshot.breakpoints[i];
+        if (i != 0) {
+            out << ",";
+        }
+        out << "{\"slot\":" << i
+            << ",\"ok\":" << boolJson(bp.ok)
+            << ",\"enabled\":" << boolJson(bp.enabled)
+            << ",\"address\":\"" << xc::hexAddress(bp.address) << "\""
+            << ",\"type\":\"" << jsonEscape(bp.type) << "\""
+            << ",\"size\":" << bp.size
+            << ",\"message\":\"" << jsonEscape(bp.message) << "\""
+            << ",\"error\":\"" << jsonEscape(bp.error) << "\"}";
+    }
+    out << "]}";
+    return out.str();
+}
+
+void applyMcpArguments(const std::string& json) {
+    std::lock_guard<std::mutex> lock(stateMutex());
+    ClientState& s = state();
+    const std::string endpoint = xc::jsonStringValue(json, "endpoint");
+    if (!endpoint.empty()) {
+        s.endpoint = endpoint;
+    }
+    const std::string target = xc::jsonStringValue(json, "target");
+    if (!target.empty()) {
+        s.target = target;
+    }
+    const std::uint64_t address = xc::jsonUint64Value(json, "address");
+    if (address != 0) {
+        s.breakpointAddress = address;
+    }
+    const std::string type = xc::jsonStringValue(json, "type");
+    if (!type.empty()) {
+        s.breakpointType = type;
+    }
+    const std::uint32_t size = xc::jsonUint32Value(json, "size");
+    if (size != 0) {
+        s.breakpointSize = size;
+    }
 }
 
 void disconnectAgent() {
@@ -412,6 +561,139 @@ std::vector<std::string> registerLines() {
     };
 }
 
+
+std::string mcpToolsListJson(std::uint64_t id) {
+    return "{\"jsonrpc\":\"2.0\",\"id\":" + std::to_string(id)
+        + ",\"result\":{\"tools\":["
+        "{\"name\":\"get_state\",\"description\":\"Read PC client, agent and breakpoint state\",\"inputSchema\":{\"type\":\"object\",\"properties\":{}}},"
+        "{\"name\":\"connect_agent\",\"description\":\"Connect to Android agent and refresh driver status\",\"inputSchema\":{\"type\":\"object\",\"properties\":{\"endpoint\":{\"type\":\"string\"}}}},"
+        "{\"name\":\"driver_status\",\"description\":\"Refresh lsdriver status through agent\",\"inputSchema\":{\"type\":\"object\",\"properties\":{\"endpoint\":{\"type\":\"string\"}}}},"
+        "{\"name\":\"breakpoint_set\",\"description\":\"Set hardware breakpoint through lsdriver\",\"inputSchema\":{\"type\":\"object\",\"properties\":{\"slot\":{\"type\":\"integer\"},\"address\":{\"type\":\"string\"},\"target\":{\"type\":\"string\"},\"type\":{\"type\":\"string\"},\"size\":{\"type\":\"integer\"}}}},"
+        "{\"name\":\"breakpoint_remove\",\"description\":\"Remove hardware breakpoint through lsdriver\",\"inputSchema\":{\"type\":\"object\",\"properties\":{\"slot\":{\"type\":\"integer\"},\"target\":{\"type\":\"string\"}}}},"
+        "{\"name\":\"breakpoint_info\",\"description\":\"Read raw breakpoint/register-hit info from agent\",\"inputSchema\":{\"type\":\"object\",\"properties\":{\"endpoint\":{\"type\":\"string\"}}}}]}}";
+}
+
+std::string mcpResultJson(std::uint64_t id, const std::string& text) {
+    return "{\"jsonrpc\":\"2.0\",\"id\":" + std::to_string(id)
+        + ",\"result\":{\"content\":[{\"type\":\"text\",\"text\":\""
+        + jsonEscape(text) + "\"}]}}";
+}
+
+std::string mcpErrorJson(std::uint64_t id, int code, const std::string& message) {
+    return "{\"jsonrpc\":\"2.0\",\"id\":" + std::to_string(id)
+        + ",\"error\":{\"code\":" + std::to_string(code)
+        + ",\"message\":\"" + jsonEscape(message) + "\"}}";
+}
+
+std::string handleMcpRequest(const std::string& line) {
+    const std::uint64_t id = xc::jsonUint64Value(line, "id");
+    const std::string method = xc::jsonStringValue(line, "method");
+    if (method == "initialize") {
+        return "{\"jsonrpc\":\"2.0\",\"id\":" + std::to_string(id)
+            + ",\"result\":{\"protocolVersion\":\"2024-11-05\",\"serverInfo\":{\"name\":\"xc-hwbp-debugger-pc\",\"version\":\"0.1.0\"},\"capabilities\":{\"tools\":{}}}}";
+    }
+    if (method == "notifications/initialized") {
+        return {};
+    }
+    if (method == "tools/list") {
+        return mcpToolsListJson(id);
+    }
+    if (method != "tools/call") {
+        return mcpErrorJson(id, -32601, "unknown MCP method: " + method);
+    }
+
+    const std::string name = xc::jsonStringValue(line, "name");
+    if (name == "get_state") {
+        return mcpResultJson(id, stateJson());
+    }
+    if (name == "connect_agent" || name == "driver_status") {
+        applyMcpArguments(line);
+        connectAndProbeAgent();
+        return mcpResultJson(id, stateJson());
+    }
+    if (name == "breakpoint_set") {
+        applyMcpArguments(line);
+        const std::uint32_t slot = xc::jsonUint32Value(line, "slot");
+        setBreakpointSlot(slot);
+        return mcpResultJson(id, stateJson());
+    }
+    if (name == "breakpoint_remove") {
+        applyMcpArguments(line);
+        const std::uint32_t slot = xc::jsonUint32Value(line, "slot");
+        removeBreakpointSlot(slot);
+        return mcpResultJson(id, stateJson());
+    }
+    if (name == "breakpoint_info") {
+        applyMcpArguments(line);
+        return mcpResultJson(id, queryBreakpointInfoRaw());
+    }
+    return mcpErrorJson(id, -32602, "unknown tool: " + name);
+}
+
+void mcpClientLoop(SocketHandle client) {
+    std::string error;
+    for (;;) {
+        const std::string line = receiveLine(client, error);
+        if (line.empty()) {
+            break;
+        }
+        const std::string response = handleMcpRequest(line);
+        if (!response.empty() && !sendLine(client, response)) {
+            break;
+        }
+    }
+    closeSocket(client);
+}
+
+void mcpServerLoop() {
+    std::string error;
+    if (!ensureSocketRuntime(error)) {
+        return;
+    }
+    const SocketHandle server = ::socket(AF_INET, SOCK_STREAM, 0);
+    if (server == kInvalidSocket) {
+        return;
+    }
+    int one = 1;
+#ifdef _WIN32
+    setsockopt(server, SOL_SOCKET, SO_REUSEADDR, reinterpret_cast<const char*>(&one), sizeof(one));
+#else
+    setsockopt(server, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one));
+#endif
+    sockaddr_in address{};
+    address.sin_family = AF_INET;
+    address.sin_port = htons(23947);
+    address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    if (::bind(server, reinterpret_cast<sockaddr*>(&address), sizeof(address)) != 0) {
+        closeSocket(server);
+        return;
+    }
+    if (::listen(server, 8) != 0) {
+        closeSocket(server);
+        return;
+    }
+    for (;;) {
+        sockaddr_in clientAddress{};
+#ifdef _WIN32
+        int len = sizeof(clientAddress);
+#else
+        socklen_t len = sizeof(clientAddress);
+#endif
+        const SocketHandle client = ::accept(server, reinterpret_cast<sockaddr*>(&clientAddress), &len);
+        if (client == kInvalidSocket) {
+            continue;
+        }
+        std::thread(mcpClientLoop, client).detach();
+    }
+}
+
+void startMcpServerOnce() {
+    static std::once_flag once;
+    std::call_once(once, [] {
+        std::thread(mcpServerLoop).detach();
+    });
+}
+
 } // namespace
 
 const DslAppConfig& dslAppConfig() {
@@ -423,6 +705,7 @@ const DslAppConfig& dslAppConfig() {
 }
 
 void compose(eui::Ui& ui, const eui::Screen& screen) {
+    startMcpServerOnce();
     const float width = clampWidth(screen.width);
     const float height = clampHeight(screen.height);
     const float leftWidth = 240.0f;
@@ -501,7 +784,7 @@ void compose(eui::Ui& ui, const eui::Screen& screen) {
 
     rect(ui, "statusbar", 0.0f, height - 30.0f, width, 30.0f, kToolbar, kLine);
     mono(ui, "status.left", 12.0f, height - 21.0f, client.lastAction, client.connected ? kCyan : kYellow, 13.0f);
-    text(ui, "status.right", width - 330.0f, height - 21.0f, "Windows GUI | Android agent", kMuted, 13.0f);
+    text(ui, "status.right", width - 330.0f, height - 21.0f, "Windows GUI | Android agent | MCP 127.0.0.1:23947", kMuted, 13.0f);
 }
 
 } // namespace app
