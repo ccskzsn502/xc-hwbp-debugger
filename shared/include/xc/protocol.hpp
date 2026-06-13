@@ -6,6 +6,7 @@
 #include <string>
 #include <string_view>
 #include <utility>
+#include <vector>
 
 namespace xc {
 
@@ -103,6 +104,26 @@ struct BreakpointRemoveResponse {
     std::uint32_t slot = 0;
     bool enabled = false;
     std::string message;
+    std::string error;
+};
+
+struct HitRecord {
+    std::uint64_t hitCount = 0;
+    std::uint64_t pc = 0;
+    std::uint64_t lr = 0;
+    std::uint64_t sp = 0;
+    std::uint64_t origX0 = 0;
+    std::uint64_t syscallno = 0;
+    std::uint64_t pstate = 0;
+    std::uint32_t fpsr = 0;
+    std::uint32_t fpcr = 0;
+    std::uint64_t x[30]{};
+};
+
+struct RecordsGetResponse {
+    bool ok = false;
+    std::uint32_t slot = 0;
+    std::vector<HitRecord> records;
     std::string error;
 };
 
@@ -281,6 +302,63 @@ inline BreakpointRemoveResponse parseBreakpointRemoveResponse(std::string_view j
     return response;
 }
 
+inline RecordsGetResponse parseRecordsGetResponse(std::string_view json) {
+    RecordsGetResponse response;
+    response.ok = jsonBoolOrFalse(json, "ok");
+    response.slot = jsonUint32Value(json, "slot");
+    response.error = jsonStringValue(json, "error");
+    if (!response.ok) {
+        return response;
+    }
+
+    const std::string recordsKey = "\"records\":[";
+    const std::size_t recordsStart = json.find(recordsKey);
+    if (recordsStart == std::string_view::npos) {
+        return response;
+    }
+    std::size_t pos = recordsStart + recordsKey.size();
+    while (pos < json.size()) {
+        const std::size_t objectStart = json.find('{', pos);
+        const std::size_t arrayEnd = json.find(']', pos);
+        if (objectStart == std::string_view::npos || (arrayEnd != std::string_view::npos && arrayEnd < objectStart)) {
+            break;
+        }
+        int depth = 0;
+        std::size_t objectEnd = objectStart;
+        for (; objectEnd < json.size(); ++objectEnd) {
+            if (json[objectEnd] == '{') {
+                ++depth;
+            } else if (json[objectEnd] == '}') {
+                --depth;
+                if (depth == 0) {
+                    break;
+                }
+            }
+        }
+        if (objectEnd >= json.size()) {
+            break;
+        }
+
+        const std::string_view recordJson = json.substr(objectStart, objectEnd - objectStart + 1);
+        HitRecord record;
+        record.hitCount = jsonUint64Value(recordJson, "hit_count");
+        record.pc = jsonUint64Value(recordJson, "pc");
+        record.lr = jsonUint64Value(recordJson, "lr");
+        record.sp = jsonUint64Value(recordJson, "sp");
+        record.origX0 = jsonUint64Value(recordJson, "orig_x0");
+        record.syscallno = jsonUint64Value(recordJson, "syscallno");
+        record.pstate = jsonUint64Value(recordJson, "pstate");
+        record.fpsr = jsonUint32Value(recordJson, "fpsr");
+        record.fpcr = jsonUint32Value(recordJson, "fpcr");
+        for (std::uint32_t i = 0; i < 30; ++i) {
+            record.x[i] = jsonUint64Value(recordJson, "x" + std::to_string(i));
+        }
+        response.records.push_back(record);
+        pos = objectEnd + 1;
+    }
+    return response;
+}
+
 inline std::string helloRequestJson(std::uint64_t id) {
     return "{\"id\":" + std::to_string(id) + ",\"cmd\":\"hello\"}";
 }
@@ -291,6 +369,11 @@ inline std::string driverStatusRequestJson(std::uint64_t id) {
 
 inline std::string breakpointInfoRequestJson(std::uint64_t id) {
     return "{\"id\":" + std::to_string(id) + ",\"cmd\":\"breakpoint.info\"}";
+}
+
+inline std::string recordsGetRequestJson(std::uint64_t id, std::uint32_t slot) {
+    return "{\"id\":" + std::to_string(id)
+        + ",\"cmd\":\"records.get\",\"slot\":" + std::to_string(slot) + "}";
 }
 
 inline std::string breakpointRemoveRequestJson(std::uint64_t id, std::uint32_t slot, std::string_view target = {}) {

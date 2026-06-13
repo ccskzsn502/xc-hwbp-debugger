@@ -502,6 +502,19 @@ public:
         return bpInfo_;
     }
 
+    hwbp_point records(std::uint32_t slot, std::string& error) {
+        error.clear();
+        if (slot >= 16) {
+            error = "slot out of range";
+            return {};
+        }
+        const hwbp_info current = info(error);
+        if (!error.empty()) {
+            return {};
+        }
+        return current.points[slot];
+    }
+
 private:
     bool ensureMapped() {
         if (req_ && req_ != MAP_FAILED) {
@@ -669,6 +682,55 @@ std::string breakpointInfoJson(std::uint64_t id, const hwbp_info& info) {
     return out;
 }
 
+std::string recordJson(const hwbp_record& record) {
+    std::string out = "{\"hit_count\":" + std::to_string(record.hit_count)
+        + ",\"pc\":\"" + xc::hexAddress(record.pc)
+        + "\",\"lr\":\"" + xc::hexAddress(record.lr)
+        + "\",\"sp\":\"" + xc::hexAddress(record.sp)
+        + "\",\"orig_x0\":\"" + xc::hexAddress(record.orig_x0)
+        + "\",\"syscallno\":\"" + xc::hexAddress(record.syscallno)
+        + "\",\"pstate\":\"" + xc::hexAddress(record.pstate)
+        + "\",\"fpsr\":" + std::to_string(record.fpsr)
+        + ",\"fpcr\":" + std::to_string(record.fpcr);
+    const std::uint64_t regs[] = {
+        record.x0, record.x1, record.x2, record.x3, record.x4, record.x5, record.x6, record.x7,
+        record.x8, record.x9, record.x10, record.x11, record.x12, record.x13, record.x14, record.x15,
+        record.x16, record.x17, record.x18, record.x19, record.x20, record.x21, record.x22, record.x23,
+        record.x24, record.x25, record.x26, record.x27, record.x28, record.x29,
+    };
+    for (std::size_t i = 0; i < 30; ++i) {
+        out += ",\"x" + std::to_string(i) + "\":\"" + xc::hexAddress(regs[i]) + "\"";
+    }
+    out += "}";
+    return out;
+}
+
+std::string recordsGetJson(std::uint64_t id, std::uint32_t slot, const hwbp_point& point) {
+    int count = point.record_count;
+    if (count < 0) {
+        count = 0;
+    }
+    if (count > 0x100) {
+        count = 0x100;
+    }
+
+    std::string out = "{\"id\":" + std::to_string(id)
+        + ",\"ok\":true,\"slot\":" + std::to_string(slot)
+        + ",\"address\":\"" + xc::hexAddress(point.hit_addr)
+        + "\",\"type\":" + std::to_string(static_cast<int>(point.bt))
+        + ",\"size\":" + std::to_string(static_cast<int>(point.bl))
+        + ",\"record_count\":" + std::to_string(count)
+        + ",\"records\":[";
+    for (int i = 0; i < count; ++i) {
+        if (i != 0) {
+            out += ",";
+        }
+        out += recordJson(point.records[i]);
+    }
+    out += "]}";
+    return out;
+}
+
 void printStartupLog(const DriverProbe& probe, std::uint16_t port) {
     std::cout << "[agent] xc-hwbp-agent 启动中\n";
     std::cout << "[agent] 协议: " << xc::kProtocolName << " v" << xc::kProtocolVersion << "\n";
@@ -740,6 +802,15 @@ void handleClient(int clientFd, LsdriverBackend& breakpoints) {
             const hwbp_info info = breakpoints.info(error);
             if (error.empty()) {
                 sendLine(clientFd, breakpointInfoJson(requestId == 0 ? 1 : requestId, info));
+            } else {
+                sendLine(clientFd, "{\"id\":" + std::to_string(requestId == 0 ? 1 : requestId) + ",\"ok\":false,\"error\":\"" + escapeJson(error) + "\"}");
+            }
+        } else if (request.find("records.get") != std::string::npos) {
+            const std::uint32_t slot = xc::jsonUint32Value(request, "slot");
+            std::string error;
+            const hwbp_point point = breakpoints.records(slot, error);
+            if (error.empty()) {
+                sendLine(clientFd, recordsGetJson(requestId == 0 ? 1 : requestId, slot, point));
             } else {
                 sendLine(clientFd, "{\"id\":" + std::to_string(requestId == 0 ? 1 : requestId) + ",\"ok\":false,\"error\":\"" + escapeJson(error) + "\"}");
             }
