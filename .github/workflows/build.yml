@@ -23,8 +23,13 @@ jobs:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
+      - name: Install Qt
+        uses: jurplel/install-qt-action@v4
+        with:
+          version: '6.7.3'
+          cache: true
       - name: Configure
-        run: cmake -S . -B build-win -DXC_BUILD_AGENT=OFF -DXC_BUILD_PC_CLIENT=ON -DEUI_BUILD_APPS=OFF -DGLFW_BUILD_WAYLAND=OFF
+        run: cmake -S . -B build-win -DXC_BUILD_AGENT=OFF -DXC_BUILD_PC_CLIENT=ON
       - name: Build
         run: cmake --build build-win --config Release --parallel
       - name: Stage PC Windows artifact
@@ -33,18 +38,12 @@ jobs:
           $packageDir = "build-win/package/xc-hwbp-debugger-windows"
           cmake --install build-win --config Release --prefix $packageDir
           $exe = Join-Path $packageDir "xc-hwbp-debugger.exe"
-          $assetsDir = Join-Path $packageDir "assets"
           if (!(Test-Path -LiteralPath $exe)) {
             throw "Missing installed Windows GUI executable."
           }
-          if (!(Test-Path -LiteralPath $assetsDir)) {
-            throw "Missing installed EUI assets directory."
-          }
-          if (!(Get-ChildItem -LiteralPath $assetsDir -Filter "*.ttf" -File -ErrorAction SilentlyContinue)) {
-            throw "Missing installed TTF font assets."
-          }
-          if (!(Get-ChildItem -LiteralPath $assetsDir -Filter "*.otf" -File -ErrorAction SilentlyContinue)) {
-            throw "Missing installed OTF font assets."
+          windeployqt --release --no-translations $exe
+          if (!(Get-ChildItem -LiteralPath $packageDir -Filter "Qt6Widgets.dll" -File -ErrorAction SilentlyContinue)) {
+            throw "Missing deployed Qt6Widgets.dll."
           }
           Get-ChildItem -LiteralPath $packageDir -Recurse | Sort-Object FullName | Format-Table FullName,Length
       - name: Verify PC Windows artifact starts without VC runtime DLLs
