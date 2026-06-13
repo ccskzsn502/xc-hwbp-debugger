@@ -73,6 +73,25 @@ int main() {
     require(!setFailed.ok, "failed breakpoint.set should parse ok=false");
     require(setFailed.error == "slot out of range", "failed breakpoint.set error should parse");
 
+    const std::string recordsRequest = xc::recordsGetRequestJson(10, 2);
+    require(recordsRequest == R"({"id":10,"cmd":"records.get","slot":2})",
+            "records.get request should serialize slot");
+    const auto records = xc::parseRecordsGetResponse(
+        R"({"id":10,"ok":true,"slot":2,"records":[{"hit_count":3,"pc":"0x78919cff84","lr":"0x78919cff90","sp":"0x7fd0011000","pstate":"0x60000000","syscallno":"0x0","x0":"0x11","x1":"0x22","x2":"0x33","x3":"0x44"}]})");
+    require(records.ok, "records.get ok should parse");
+    require(records.slot == 2, "records.get slot should parse");
+    require(records.records.size() == 1, "records.get should parse one hit record");
+    require(records.records[0].hitCount == 3, "records.get hit count should parse");
+    require(records.records[0].pc == 0x78919CFF84ULL, "records.get pc should parse");
+    require(records.records[0].lr == 0x78919CFF90ULL, "records.get lr should parse");
+    require(records.records[0].sp == 0x7FD0011000ULL, "records.get sp should parse");
+    require(records.records[0].x[0] == 0x11, "records.get x0 should parse");
+    require(records.records[0].x[3] == 0x44, "records.get x3 should parse");
+
+    const auto recordsFailed = xc::parseRecordsGetResponse(R"({"id":11,"ok":false,"error":"slot out of range"})");
+    require(!recordsFailed.ok, "failed records.get should parse ok=false");
+    require(recordsFailed.error == "slot out of range", "failed records.get error should parse");
+
     std::cout << "protocol tests passed\n";
     return 0;
 }

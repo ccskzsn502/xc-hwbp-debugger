@@ -30,11 +30,13 @@
 #include <QStyle>
 #include <QTableWidget>
 #include <QTableWidgetItem>
+#include <QTimer>
 #include <QVBoxLayout>
 #include <QWidget>
 
 #include <array>
 #include <cstdint>
+#include <sstream>
 #include <string>
 
 #ifndef _WIN32
@@ -68,6 +70,7 @@ struct ClientState {
     xc::BreakpointSetResponse breakpoints[4];
     std::string breakpointLabels[4];
     std::string lastBreakpointInfo;
+    xc::RecordsGetResponse hitRecords;
     std::string lastError = "未连接";
     std::string lastAction = "就绪: 等待连接手机 Agent";
     std::uint64_t requestId = 1;
@@ -147,6 +150,43 @@ std::string displayAddress(const BreakpointAddressInput& input) {
         return input.module + "+" + xc::hexAddress(input.offset);
     }
     return input.address == 0 ? "-" : xc::hexAddress(input.address);
+}
+
+std::string registerLine(const std::string& name, std::uint64_t value) {
+    return name + "=" + xc::hexAddress(value);
+}
+
+std::string formatLatestHitRegisters(const xc::RecordsGetResponse& records) {
+    if (!records.ok || records.records.empty()) {
+        return "寄存器\n\n等待真实断点命中数据。收到 Agent 返回的 PC/LR/SP/X 寄存器后在这里集中显示。";
+    }
+    const auto& hit = records.records.back();
+    std::ostringstream out;
+    out << "寄存器\n\n";
+    out << "slot=" << records.slot << "  hitCount=" << hit.hitCount << "\n";
+    out << "PC=" << xc::hexAddress(hit.pc)
+        << "  LR=" << xc::hexAddress(hit.lr)
+        << "  SP=" << xc::hexAddress(hit.sp) << "\n";
+    out << registerLine("PSTATE", hit.pstate) << "  " << registerLine("SYSCALL", hit.syscallno)
+        << "  FPSR=" << hit.fpsr << "  FPCR=" << hit.fpcr << "\n\n";
+    for (int i = 0; i < 30; ++i) {
+        out << registerLine("X" + std::to_string(i), hit.x[i]);
+        out << ((i % 3 == 2) ? "\n" : "  ");
+    }
+    return out.str();
+}
+
+std::string formatLatestHitStack(const xc::RecordsGetResponse& records) {
+    if (!records.ok || records.records.empty()) {
+        return "调用栈\n\n暂无真实命中。后续收到 PC/LR/SP 调用链后在这里显示。";
+    }
+    const auto& hit = records.records.back();
+    std::ostringstream out;
+    out << "调用栈\n\n";
+    out << "PC " << xc::hexAddress(hit.pc) << "\n";
+    out << "LR " << xc::hexAddress(hit.lr) << "\n";
+    out << "SP " << xc::hexAddress(hit.sp) << "\n";
+    return out.str();
 }
 
 std::string protocolTypeForUi(const QString& value) {
@@ -326,6 +366,9 @@ public:
         resize(1360, 780);
         setMinimumSize(1040, 680);
         buildUi();
+        hitPollTimer_ = new QTimer(this);
+        hitPollTimer_->setInterval(1000);
+        connect(hitPollTimer_, &QTimer::timeout, this, [this] { pollHitRecords(); });
         refreshUi();
     }
 
@@ -349,6 +392,7 @@ private:
     QPlainTextEdit* registersText_ = nullptr;
     QPlainTextEdit* stackText_ = nullptr;
     QPlainTextEdit* infoText_ = nullptr;
+    QTimer* hitPollTimer_ = nullptr;
 
     void buildUi() {
         auto* central = new QWidget;
@@ -606,15 +650,20 @@ private:
         state_.driver = xc::parseDriverStatusResponse(statusLine);
         state_.lastError.clear();
         state_.lastAction = state_.driver.ok ? "已连接 Agent，驱动状态已刷新" : "已连接 Agent，但驱动状态返回错误";
+        updateHitPolling();
         refreshUi();
     }
 
     void disconnectAgent() {
+        if (hitPollTimer_) {
+            hitPollTimer_->stop();
+        }
         closeAgentSession();
         state_.connected = false;
         state_.helloOk = false;
         state_.driver = {};
         state_.lastBreakpointInfo.clear();
+        state_.hitRecords = {};
         for (int i = 0; i < 4; ++i) {
             state_.breakpoints[i] = {};
             state_.breakpointLabels[i].clear();
@@ -650,6 +699,11 @@ private:
         state_.breakpointLabels[slot] = displayAddress(state_.breakpointInput);
         state_.lastError = response.ok ? "" : response.error;
         state_.lastAction = response.ok ? response.message : "下断失败: " + response.error;
+        if (response.ok) {
+            updateHitPolling();
+            queryHitRecords(static_cast<std::uint32_t>(slot));
+            return;
+        }
         refreshUi();
     }
 
@@ -674,7 +728,9 @@ private:
         if (response.ok) {
             state_.breakpoints[slot] = {};
             state_.breakpointLabels[slot].clear();
+            state_.hitRecords = {};
         }
+        updateHitPolling();
         state_.lastError = response.ok ? "" : response.error;
         state_.lastAction = response.ok ? response.message : "删断失败: " + response.error;
         refreshUi();
@@ -700,7 +756,64 @@ private:
         state_.lastError.clear();
         state_.lastAction = "硬件断点信息已刷新";
         state_.lastBreakpointInfo = responseLine;
+        queryHitRecords(static_cast<std::uint32_t>(slotSpin_->value()));
+    }
+
+    void queryHitRecords(std::uint32_t slot) {
+        std::string error;
+        const std::string responseLine = sendAgentRequest(
+            xc::recordsGetRequestJson(state_.requestId++, slot),
+            error,
+            "发送 records.get 失败");
+        if (responseLine.empty()) {
+            state_.lastError = error;
+            state_.lastAction = "查询命中记录失败: " + error;
+            state_.hitRecords = {};
+            refreshUi();
+            return;
+        }
+
+        state_.hitRecords = xc::parseRecordsGetResponse(responseLine);
+        if (!state_.hitRecords.ok) {
+            state_.lastError = state_.hitRecords.error;
+            state_.lastAction = "查询命中记录失败: " + state_.hitRecords.error;
+        } else if (!state_.hitRecords.records.empty()) {
+            state_.lastError.clear();
+            state_.lastAction = "断点命中记录已刷新: slot" + std::to_string(slot)
+                + " hitCount=" + std::to_string(state_.hitRecords.records.back().hitCount);
+        }
         refreshUi();
+    }
+
+    void pollHitRecords() {
+        if (!state_.connected || !hasAgentSocket()) {
+            updateHitPolling();
+            return;
+        }
+        for (std::uint32_t slot = 0; slot < 4; ++slot) {
+            if (state_.breakpoints[slot].ok && state_.breakpoints[slot].enabled) {
+                queryHitRecords(slot);
+                return;
+            }
+        }
+        updateHitPolling();
+    }
+
+    void updateHitPolling() {
+        bool hasActiveBreakpoint = false;
+        for (const auto& breakpoint : state_.breakpoints) {
+            if (breakpoint.ok && breakpoint.enabled) {
+                hasActiveBreakpoint = true;
+                break;
+            }
+        }
+        if (hasActiveBreakpoint && state_.connected) {
+            if (!hitPollTimer_->isActive()) {
+                hitPollTimer_->start();
+            }
+            return;
+        }
+        hitPollTimer_->stop();
     }
 
     void refreshUi() {
@@ -717,15 +830,20 @@ private:
         errorLabel_->style()->polish(errorLabel_);
 
         refreshBreakpointsTable();
-        emptyDataLabel_->setText(state_.connected
-            ? "等待真实断点命中数据，当前没有寄存器和调用栈快照"
-            : "等待真实断点命中数据，请先连接 Agent");
-        registersText_->setPlainText("寄存器\n\n等待真实断点命中数据。收到 Agent 返回的 PC/LR/SP/X 寄存器后在这里集中显示。");
-        stackText_->setPlainText("调用栈\n\n暂无真实命中。后续收到 PC/LR/SP 调用链后在这里显示。");
+        refreshHitDetails();
         infoText_->setPlainText(state_.lastBreakpointInfo.empty()
             ? "断点信息\n\n只显示 Agent 返回的真实断点和命中信息。启动时不填充模拟数据。"
             : qstr(state_.lastBreakpointInfo));
         statusBar()->showMessage(qstr(state_.lastAction));
+    }
+
+    void refreshHitDetails() {
+        const bool hasHit = state_.hitRecords.ok && !state_.hitRecords.records.empty();
+        emptyDataLabel_->setText(hasHit
+            ? "已收到真实断点命中数据"
+            : (state_.connected ? "等待真实断点命中数据，当前没有寄存器和调用栈快照" : "等待真实断点命中数据，请先连接 Agent"));
+        registersText_->setPlainText(qstr(formatLatestHitRegisters(state_.hitRecords)));
+        stackText_->setPlainText(qstr(formatLatestHitStack(state_.hitRecords)));
     }
 
     void refreshBreakpointsTable() {

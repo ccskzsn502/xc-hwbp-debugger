@@ -97,6 +97,14 @@ int main(int argc, char** argv) {
             "GUI connection button should own a persistent Agent socket that disconnect closes explicitly");
     require(contains(mainCpp, "sendAgentRequest") && contains(mainCpp, "ensureAgentSession"),
             "GUI commands should reuse one Agent session through a shared request helper");
+    require(contains(mainCpp, "records.get") && contains(mainCpp, "parseRecordsGetResponse"),
+            "PC GUI must request and parse records.get so breakpoint hits appear instead of only raw breakpoint.info JSON");
+    require(contains(mainCpp, "refreshHitDetails") && contains(mainCpp, "hitCount") && contains(mainCpp, "PC=") && contains(mainCpp, "LR=") && contains(mainCpp, "SP="),
+            "PC GUI must render latest hit registers into the hit detail pane");
+    require(contains(mainCpp, "#include <QTimer>") && contains(mainCpp, "hitPollTimer_") && contains(mainCpp, "pollHitRecords"),
+            "PC GUI must poll records.get because the JSONL protocol has no async hit push from the phone");
+    require(contains(mainCpp, "queryHitRecords") && contains(methodBody(mainCpp, "void queryBreakpointInfo()"), "queryHitRecords"),
+            "manual breakpoint refresh must also fetch hit records for the selected slot");
     require(!contains(methodBody(mainCpp, "void setBreakpoint()"), "openAgentSession")
                 && !contains(methodBody(mainCpp, "void removeBreakpoint()"), "openAgentSession")
                 && !contains(methodBody(mainCpp, "void queryBreakpointInfo()"), "openAgentSession"),
