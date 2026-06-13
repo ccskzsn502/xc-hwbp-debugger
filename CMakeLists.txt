@@ -15,6 +15,7 @@ endif()
 
 option(XC_BUILD_AGENT "Build Android hardware breakpoint agent" ON)
 option(XC_BUILD_PC_CLIENT "Build desktop GUI client" ON)
+option(XC_BUILD_MCP_SERVER "Build stdio MCP server for AI debugger control" OFF)
 
 add_library(xc_shared INTERFACE)
 target_include_directories(xc_shared INTERFACE ${CMAKE_CURRENT_SOURCE_DIR}/shared/include)
@@ -25,6 +26,10 @@ endif()
 
 if(XC_BUILD_PC_CLIENT)
     add_subdirectory(pc-client)
+endif()
+
+if(XC_BUILD_MCP_SERVER)
+    add_subdirectory(mcp-server)
 endif()
 
 option(XC_BUILD_TESTS "Build tests" OFF)
