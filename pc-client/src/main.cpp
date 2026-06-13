@@ -329,8 +329,12 @@ public:
         refreshUi();
     }
 
+    ~DebuggerWindow() override { closeAgentSession(); }
+
 private:
     ClientState state_;
+    SocketHandle agentSocket_ = kInvalidSocket;
+    std::string agentSocketEndpoint_;
     QLineEdit* endpointEdit_ = nullptr;
     QLineEdit* targetEdit_ = nullptr;
     QLineEdit* addressEdit_ = nullptr;
@@ -524,43 +528,81 @@ private:
         return true;
     }
 
+    bool hasAgentSocket() const {
+        return agentSocket_ != kInvalidSocket;
+    }
+
+    void closeAgentSession() {
+        if (hasAgentSocket()) {
+            closeSocket(agentSocket_);
+            agentSocket_ = kInvalidSocket;
+        }
+        agentSocketEndpoint_.clear();
+    }
+
+    bool ensureAgentSession(std::string& error) {
+        if (hasAgentSocket() && agentSocketEndpoint_ == state_.endpoint && state_.helloOk) {
+            state_.connected = true;
+            return true;
+        }
+
+        closeAgentSession();
+        SocketHandle socket = kInvalidSocket;
+        xc::HelloResponse hello;
+        if (!openAgentSession(state_.endpoint, socket, hello, error)) {
+            state_.connected = false;
+            state_.helloOk = false;
+            return false;
+        }
+
+        agentSocket_ = socket;
+        agentSocketEndpoint_ = state_.endpoint;
+        state_.hello = hello;
+        state_.helloOk = true;
+        state_.connected = true;
+        return true;
+    }
+
+    std::string sendAgentRequest(const std::string& request, std::string& error, const std::string& sendFailure) {
+        if (!ensureAgentSession(error)) {
+            return {};
+        }
+        if (!sendLine(agentSocket_, request)) {
+            error = sendFailure;
+            closeAgentSession();
+            state_.connected = false;
+            state_.helloOk = false;
+            return {};
+        }
+        const std::string responseLine = receiveLine(agentSocket_, error);
+        if (responseLine.empty()) {
+            closeAgentSession();
+            state_.connected = false;
+            state_.helloOk = false;
+            return {};
+        }
+        state_.connected = true;
+        return responseLine;
+    }
+
     void markConnected() {
         applyInputs(false);
         state_.lastAction = "正在连接 " + state_.endpoint + ":" + std::to_string(xc::kDefaultAgentPort);
         refreshUi();
 
-        SocketHandle socket = kInvalidSocket;
-        xc::HelloResponse hello;
+        closeAgentSession();
         std::string error;
-        if (!openAgentSession(state_.endpoint, socket, hello, error)) {
-            state_.connected = false;
-            state_.helloOk = false;
+        const std::string statusLine = sendAgentRequest(
+            xc::driverStatusRequestJson(state_.requestId++),
+            error,
+            "发送 driver.status 失败");
+        if (statusLine.empty()) {
             state_.lastError = error;
             state_.lastAction = "连接失败: " + error;
             refreshUi();
             return;
         }
 
-        if (!sendLine(socket, xc::driverStatusRequestJson(state_.requestId++))) {
-            closeSocket(socket);
-            state_.lastError = "发送 driver.status 失败";
-            state_.lastAction = "驱动检测请求失败";
-            refreshUi();
-            return;
-        }
-
-        const std::string statusLine = receiveLine(socket, error);
-        closeSocket(socket);
-        if (statusLine.empty()) {
-            state_.lastError = error;
-            state_.lastAction = "驱动检测失败: " + error;
-            refreshUi();
-            return;
-        }
-
-        state_.hello = hello;
-        state_.helloOk = true;
-        state_.connected = true;
         state_.driver = xc::parseDriverStatusResponse(statusLine);
         state_.lastError.clear();
         state_.lastAction = state_.driver.ok ? "已连接 Agent，驱动状态已刷新" : "已连接 Agent，但驱动状态返回错误";
@@ -568,6 +610,7 @@ private:
     }
 
     void disconnectAgent() {
+        closeAgentSession();
         state_.connected = false;
         state_.helloOk = false;
         state_.driver = {};
@@ -590,28 +633,11 @@ private:
         state_.lastAction = "正在写入硬件断点 slot" + std::to_string(slot);
         refreshUi();
 
-        SocketHandle socket = kInvalidSocket;
-        xc::HelloResponse hello;
         std::string error;
-        if (!openAgentSession(state_.endpoint, socket, hello, error)) {
-            state_.lastError = error;
-            state_.lastAction = "下断失败: " + error;
-            refreshUi();
-            return;
-        }
-
         const std::string request = state_.breakpointInput.module.empty()
             ? xc::breakpointSetRequestJson(state_.requestId++, static_cast<std::uint32_t>(slot), state_.breakpointInput.address, state_.breakpointType, state_.breakpointSize, state_.target)
             : xc::breakpointSetModuleRequestJson(state_.requestId++, static_cast<std::uint32_t>(slot), state_.breakpointInput.module, state_.breakpointInput.offset, state_.breakpointType, state_.breakpointSize, state_.target);
-        if (!sendLine(socket, request)) {
-            closeSocket(socket);
-            state_.lastError = "发送 breakpoint.set 失败";
-            state_.lastAction = "下断请求发送失败";
-            refreshUi();
-            return;
-        }
-        const std::string responseLine = receiveLine(socket, error);
-        closeSocket(socket);
+        const std::string responseLine = sendAgentRequest(request, error, "发送 breakpoint.set 失败");
         if (responseLine.empty()) {
             state_.lastError = error;
             state_.lastAction = "下断失败: " + error;
@@ -622,9 +648,6 @@ private:
         const auto response = xc::parseBreakpointSetResponse(responseLine);
         state_.breakpoints[slot] = response;
         state_.breakpointLabels[slot] = displayAddress(state_.breakpointInput);
-        state_.hello = hello;
-        state_.helloOk = true;
-        state_.connected = true;
         state_.lastError = response.ok ? "" : response.error;
         state_.lastAction = response.ok ? response.message : "下断失败: " + response.error;
         refreshUi();
@@ -636,24 +659,11 @@ private:
         state_.lastAction = "正在删除硬件断点 slot" + std::to_string(slot);
         refreshUi();
 
-        SocketHandle socket = kInvalidSocket;
-        xc::HelloResponse hello;
         std::string error;
-        if (!openAgentSession(state_.endpoint, socket, hello, error)) {
-            state_.lastError = error;
-            state_.lastAction = "删断失败: " + error;
-            refreshUi();
-            return;
-        }
-        if (!sendLine(socket, xc::breakpointRemoveRequestJson(state_.requestId++, static_cast<std::uint32_t>(slot), state_.target))) {
-            closeSocket(socket);
-            state_.lastError = "发送 breakpoint.remove 失败";
-            state_.lastAction = "删断请求发送失败";
-            refreshUi();
-            return;
-        }
-        const std::string responseLine = receiveLine(socket, error);
-        closeSocket(socket);
+        const std::string responseLine = sendAgentRequest(
+            xc::breakpointRemoveRequestJson(state_.requestId++, static_cast<std::uint32_t>(slot), state_.target),
+            error,
+            "发送 breakpoint.remove 失败");
         if (responseLine.empty()) {
             state_.lastError = error;
             state_.lastAction = "删断失败: " + error;
@@ -665,9 +675,6 @@ private:
             state_.breakpoints[slot] = {};
             state_.breakpointLabels[slot].clear();
         }
-        state_.hello = hello;
-        state_.helloOk = true;
-        state_.connected = true;
         state_.lastError = response.ok ? "" : response.error;
         state_.lastAction = response.ok ? response.message : "删断失败: " + response.error;
         refreshUi();
@@ -678,26 +685,11 @@ private:
         state_.lastAction = "正在查询硬件断点信息";
         refreshUi();
 
-        SocketHandle socket = kInvalidSocket;
-        xc::HelloResponse hello;
         std::string error;
-        if (!openAgentSession(state_.endpoint, socket, hello, error)) {
-            state_.lastError = error;
-            state_.lastAction = "查询断点失败: " + error;
-            state_.lastBreakpointInfo = jsonError(error);
-            refreshUi();
-            return;
-        }
-        if (!sendLine(socket, xc::breakpointInfoRequestJson(state_.requestId++))) {
-            closeSocket(socket);
-            state_.lastError = "发送 breakpoint.info 失败";
-            state_.lastAction = "查询断点请求发送失败";
-            state_.lastBreakpointInfo = jsonError(state_.lastError);
-            refreshUi();
-            return;
-        }
-        const std::string responseLine = receiveLine(socket, error);
-        closeSocket(socket);
+        const std::string responseLine = sendAgentRequest(
+            xc::breakpointInfoRequestJson(state_.requestId++),
+            error,
+            "发送 breakpoint.info 失败");
         if (responseLine.empty()) {
             state_.lastError = error;
             state_.lastAction = "查询断点失败: " + error;
@@ -705,9 +697,6 @@ private:
             refreshUi();
             return;
         }
-        state_.hello = hello;
-        state_.helloOk = true;
-        state_.connected = true;
         state_.lastError.clear();
         state_.lastAction = "硬件断点信息已刷新";
         state_.lastBreakpointInfo = responseLine;
