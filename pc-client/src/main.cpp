@@ -1,3 +1,14 @@
+#ifdef _WIN32
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <winsock2.h>
+#include <ws2tcpip.h>
+#endif
+
 #include "eui_neo.h"
 #include "xc/protocol.hpp"
 
@@ -12,14 +23,8 @@
 #include <sstream>
 #include <string>
 #include <thread>
-#include <vector>
 
 #ifdef _WIN32
-#ifndef WIN32_LEAN_AND_MEAN
-#define WIN32_LEAN_AND_MEAN
-#endif
-#include <winsock2.h>
-#include <ws2tcpip.h>
 #else
 #include <arpa/inet.h>
 #include <netinet/in.h>
@@ -59,12 +64,26 @@ void fillRect(eui::Ui& ui, const std::string& id, float x, float y, float w, flo
     ui.rect(id).position(x, y).size(w, h).color(color).build();
 }
 
-void text(eui::Ui& ui, const std::string& id, float x, float y, const std::string& value, Color color = kText, float size = 14.0f) {
-    ui.text(id).position(x, y).text(value).fontSize(size).color(color).build();
+void text(eui::Ui& ui, const std::string& id, float x, float y, const std::string& value, Color color = kText, float size = 15.0f) {
+    ui.text(id)
+        .position(x, y)
+        .text(value)
+        .fontSize(size)
+        .fontFamily("Microsoft YaHei")
+        .lineHeight(size + 5.0f)
+        .color(color)
+        .build();
 }
 
-void mono(eui::Ui& ui, const std::string& id, float x, float y, const std::string& value, Color color = kText, float size = 13.0f) {
-    ui.text(id).position(x, y).text(value).fontSize(size).fontFamily("Consolas").color(color).build();
+void mono(eui::Ui& ui, const std::string& id, float x, float y, const std::string& value, Color color = kText, float size = 14.0f) {
+    ui.text(id)
+        .position(x, y)
+        .text(value)
+        .fontSize(size)
+        .fontFamily("Cascadia Mono")
+        .lineHeight(size + 5.0f)
+        .color(color)
+        .build();
 }
 
 struct ClientState {
@@ -522,46 +541,6 @@ std::string breakpointSlotLine(std::uint32_t slot, const xc::BreakpointSetRespon
     }
     return std::to_string(slot) + "  " + bp.type + "  " + xc::hexAddress(bp.address) + "  开启";
 }
-
-std::vector<std::string> registerLines() {
-    return {
-        "x0   0000000000000058   DEC:88           HEX:0x58",
-        "x1   0000007A42869674   DEC:525102126708 HEX:0x7A42869674   [stack]+0xF7674",
-        "x2   0000000000000000   DEC:0            HEX:0x0",
-        "x3   0000000000000000   DEC:0            HEX:0x0",
-        "x4   0000000000000000   DEC:0            HEX:0x0",
-        "x5   0000000000006123   DEC:24867        HEX:0x6123",
-        "x6   00000000000001AA   DEC:426          HEX:0x1AA",
-        "x7   0000000000006123   DEC:24867        HEX:0x6123",
-        "x8   164610C9BA59984E   DEC:866414860366 HEX:0x164610C9BA59984E",
-        "x9   0000000000000000   DEC:0            HEX:0x0",
-        "x10  00000000EE7E1856   DEC:4001241174   HEX:0xEE7E1856",
-        "x11  0000007891D4ED30   DEC:517842726192 HEX:0x7891D4ED30   libdemo.so+0x53BD30",
-        "x12  00000000102D7F70   DEC:27141720     HEX:0x102D7F70",
-        "x13  00000000000004E7   DEC:1255         HEX:0x4E7",
-        "x14  00000007C0000360   DEC:532575945568 HEX:0x7C0000360    [cfi shadow]+0x6984D360",
-        "x15  000000000CAA098E   DEC:3298859199   HEX:0xCAA098E",
-        "x16  0000007891D2FD20   DEC:517842599200 HEX:0x7891D2FD20   libdemo.so+0x51CD20",
-        "x17  00000078919CFF84   DEC:517839060868 HEX:0x78919CFF84   libdemo.so+0x1BCF84",
-        "x18  00000077FDD4C000   DEC:515359686656 HEX:0x77FDD4C000",
-        "x19  0000007A42869A80   DEC:525102127744 HEX:0x7A42869A80   [stack]+0xF7A80",
-        "x20  0000007A42869730   DEC:525102126896 HEX:0x7A42869730   [stack]+0xF7730",
-        "x21  0000007A42869730   DEC:525102126896 HEX:0x7A42869730   [stack]+0xF7730",
-        "x22  00000000000071C5   DEC:29125        HEX:0x71C5",
-        "x23  0000000000007731   DEC:30513        HEX:0x7731",
-        "x24  0000007A42869730   DEC:525102126896 HEX:0x7A42869730   [stack]+0xF7730",
-        "x25  0000007A42869730   DEC:525102126896 HEX:0x7A42869730   [stack]+0xF7730",
-        "x26  0000007A42869A70   DEC:525102127728 HEX:0x7A42869A70   [stack]+0xF7A70",
-        "x27  00000000000FC000   DEC:1032192      HEX:0xFC000",
-        "x28  0000007A42771000   DEC:525101103248 HEX:0x7A42771000   [stack]+0x0",
-        "x29  0000007A42869690   DEC:525102126736 HEX:0x7A42869690   [stack]+0xF7690",
-        "x30  0000007891B08068   DEC:517840339048 HEX:0x7891B08068   libdemo.so+0x2F5068",
-        "SP   0000007A42869670   DEC:525102126704 HEX:0x7A42869670   [stack]+0xF7670",
-        "PC   00000078919CFF84   DEC:517839060868 HEX:0x78919CFF84   libdemo.so+0x1BCF84"
-    };
-}
-
-
 std::string mcpToolsListJson(std::uint64_t id) {
     return "{\"jsonrpc\":\"2.0\",\"id\":" + std::to_string(id)
         + ",\"result\":{\"tools\":["
@@ -700,6 +679,7 @@ const DslAppConfig& dslAppConfig() {
     static const DslAppConfig config = DslAppConfig{}
         .title("XC 硬件断点调试器")
         .pageId("xc_hwbp_debugger")
+        .textFont("C:/Windows/Fonts/msyh.ttc")
         .windowSize(1360, 760);
     return config;
 }
@@ -763,24 +743,15 @@ void compose(eui::Ui& ui, const eui::Screen& screen) {
     mono(ui, "driver.rule", 16.0f, 598.0f, "策略: 共享内存握手判断在线", kYellow, 12.0f);
 
     panel(ui, "main", mainX, 102.0f, mainW, mainH, "数据视图");
-    mono(ui, "main.thread", mainX + 14.0f, 132.0f, client.connected ? "Tid : - | Pid : - | Agent 已连接，等待真实断点命中数据" : "Tid : - | Pid : - | 当前没有连接到手机 agent", kText, 14.0f);
-    mono(ui, "main.note", mainX + 14.0f, 154.0f, client.connected ? ("Agent: " + client.hello.name + " | 内核: " + client.driver.kernelRelease + " | " + client.driver.message) : "这里显示断点命中后的寄存器、DEC/HEX、模块偏移、堆栈。当前是静态预览数据。", client.connected ? kCyan : kMuted, 13.0f);
-
-    const auto lines = registerLines();
-    float y = 182.0f;
-    int idx = 0;
-    for (const std::string& line : lines) {
-        const Color color = line.rfind("PC", 0) == 0 || line.rfind("SP", 0) == 0 ? kCyan : (idx % 2 == 0 ? kText : Color{0.74f, 0.77f, 0.82f, 1.0f});
-        mono(ui, "reg." + std::to_string(idx), mainX + 14.0f, y, line, color, 13.0f);
-        y += 19.0f;
-        ++idx;
-        if (y > height - 116.0f) { break; }
-    }
+    mono(ui, "main.thread", mainX + 14.0f, 132.0f, client.connected ? "Tid : - | Pid : - | Agent 已连接，等待真实断点命中数据" : "Tid : - | Pid : - | 当前没有连接到手机 agent", kText, 15.0f);
+    mono(ui, "main.empty.title", mainX + 14.0f, 160.0f, "等待真实断点命中数据", client.connected ? kCyan : kMuted, 15.0f);
+    mono(ui, "main.empty.0", mainX + 14.0f, 188.0f, "连接 agent 并发生硬件断点命中后，才会显示寄存器、DEC/HEX、模块偏移和堆栈。", kMuted, 14.0f);
+    mono(ui, "main.empty.1", mainX + 14.0f, 214.0f, client.connected ? ("Agent: " + client.hello.name + " | 内核: " + client.driver.kernelRelease + " | " + client.driver.message) : "当前没有采集到任何命中数据。", client.connected ? kCyan : kMuted, 14.0f);
 
     rect(ui, "stack.panel", mainX, height - 104.0f, mainW, 66.0f, kPanel, kLine);
     text(ui, "stack.title", mainX + 10.0f, height - 96.0f, "堆栈", kText, 14.0f);
-    mono(ui, "stack.0", mainX + 14.0f, height - 72.0f, "#0: 暂无真实命中；连接 agent 后显示 PC/LR 调用链", kMuted, 13.0f);
-    mono(ui, "stack.1", mainX + 14.0f, height - 50.0f, "#1: 后续按 断点ID / TID / 调用栈签名 自动归类", kMuted, 13.0f);
+    mono(ui, "stack.0", mainX + 14.0f, height - 72.0f, "#0: 暂无真实命中；连接 agent 后显示 PC/LR 调用链", kMuted, 14.0f);
+    mono(ui, "stack.1", mainX + 14.0f, height - 50.0f, "#1: 后续按 断点ID / TID / 调用栈签名 自动归类", kMuted, 14.0f);
 
     rect(ui, "statusbar", 0.0f, height - 30.0f, width, 30.0f, kToolbar, kLine);
     mono(ui, "status.left", 12.0f, height - 21.0f, client.lastAction, client.connected ? kCyan : kYellow, 13.0f);

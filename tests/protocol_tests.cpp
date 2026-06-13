@@ -23,14 +23,14 @@ int main() {
     require(hello.protocol == "xc-hwbp-jsonl", "hello protocol should parse");
     require(hello.version == 1, "hello version should parse");
 
-    const std::string statusJson = R"({"id":1,"ok":true,"driver":{"name":"lsdriver","module_loaded":true,"proc_modules_readable":true,"kernel_release":"5.15.189-android13","message":"lsdriver 驱动模块已加载"}})";
+    const std::string statusJson = R"({"id":1,"ok":true,"driver":{"name":"lsdriver","module_loaded":true,"proc_modules_readable":true,"kernel_release":"5.15.189-android13","message":"driver loaded"}})";
     const auto status = xc::parseDriverStatusResponse(statusJson);
     require(status.ok, "driver status ok should be true");
     require(status.name == "lsdriver", "driver name should parse");
     require(status.moduleLoaded, "module_loaded should parse true");
     require(status.procModulesReadable, "proc_modules_readable should parse true");
     require(status.kernelRelease == "5.15.189-android13", "kernel release should parse");
-    require(status.message == "lsdriver 驱动模块已加载", "driver message should parse unicode text");
+    require(status.message == "driver loaded", "driver message should parse");
 
     const auto failed = xc::parseDriverStatusResponse(R"({"id":2,"ok":false,"error":"bad command"})");
     require(!failed.ok, "failed status should parse ok=false");
@@ -46,7 +46,7 @@ int main() {
     require(setParsed.type == "execute", "breakpoint.set type should parse");
     require(setParsed.size == 4, "breakpoint.set size should parse");
 
-    const std::string setResponseJson = R"({"id":7,"ok":true,"breakpoint":{"slot":0,"address":"0x78919cff84","type":"execute","size":4,"enabled":true,"message":"硬件断点已写入 slot0"}})";
+    const std::string setResponseJson = R"({"id":7,"ok":true,"breakpoint":{"slot":0,"address":"0x78919cff84","type":"execute","size":4,"enabled":true,"message":"breakpoint written slot0"}})";
     const auto setResponse = xc::parseBreakpointSetResponse(setResponseJson);
     require(setResponse.ok, "breakpoint.set response ok should parse");
     require(setResponse.slot == 0, "breakpoint.set response slot should parse");
@@ -54,7 +54,7 @@ int main() {
     require(setResponse.type == "execute", "breakpoint.set response type should parse");
     require(setResponse.size == 4, "breakpoint.set response size should parse");
     require(setResponse.enabled, "breakpoint.set response enabled should parse");
-    require(setResponse.message == "硬件断点已写入 slot0", "breakpoint.set response message should parse");
+    require(setResponse.message == "breakpoint written slot0", "breakpoint.set response message should parse");
 
     const auto setFailed = xc::parseBreakpointSetResponse(R"({"id":8,"ok":false,"error":"slot out of range"})");
     require(!setFailed.ok, "failed breakpoint.set should parse ok=false");

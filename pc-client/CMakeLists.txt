@@ -1,9 +1,11 @@
 include(FetchContent)
+include(${CMAKE_SOURCE_DIR}/cmake/patch_eui_neo.cmake)
 
 FetchContent_Declare(
     eui_neo
     GIT_REPOSITORY https://github.com/sudoevolve/EUI-NEO.git
     GIT_TAG main
+    PATCH_COMMAND ${CMAKE_COMMAND} -DEUI_NEO_SOURCE_DIR=<SOURCE_DIR> -P ${CMAKE_SOURCE_DIR}/cmake/patch_eui_neo.cmake
 )
 set(EUI_BUILD_APPS OFF CACHE BOOL "" FORCE)
 FetchContent_MakeAvailable(eui_neo)
