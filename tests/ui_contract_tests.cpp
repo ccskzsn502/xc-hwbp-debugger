@@ -69,6 +69,8 @@ int main(int argc, char** argv) {
     const std::filesystem::path root = argv[1];
     const std::string mainCpp = readFile(root / "pc-client" / "src" / "main.cpp");
     const std::string pcCMake = readFile(root / "pc-client" / "CMakeLists.txt");
+    const std::string editorconfig = readFile(root / ".editorconfig");
+    const std::string readme = readFile(root / "README.md");
     const std::string workflow = readFile(root / ".github" / "workflows" / "build.yml");
 
     require(!contains(mainCpp, "std::vector<std::string> registerLines()"),
@@ -79,12 +81,22 @@ int main(int argc, char** argv) {
             "empty data view should tell the user it is waiting for real breakpoint data");
     require(contains(mainCpp, "#include <QApplication>") && contains(mainCpp, "QMainWindow"),
             "PC GUI must be implemented with Qt Widgets");
+    require(contains(editorconfig, "charset = utf-8"),
+            "repository should pin source files to UTF-8 so Chinese UI text is stable across editors");
     require(!contains(mainCpp, "eui_neo.h") && !contains(mainCpp, "eui::"),
             "PC GUI must not use EUI-NEO rendering after the Qt rewrite");
     require(contains(mainCpp, "Microsoft YaHei UI") || contains(mainCpp, "Microsoft YaHei"),
             "Qt GUI should explicitly use a clear Chinese Windows UI font");
     require(contains(mainCpp, "QSplitter") && contains(mainCpp, "QTableWidget") && contains(mainCpp, "QPlainTextEdit"),
             "Qt GUI should use a fixed debugger layout with splitter, tables and plain text log/stack views");
+    require(contains(mainCpp, "buildConnectionBar") && contains(mainCpp, "buildBreakpointEditor"),
+            "top controls should be split into connection and breakpoint editor bars instead of one crowded toolbar");
+    require(contains(mainCpp, "statusPill") && contains(mainCpp, "QLabel[role=\"statusPill\"]"),
+            "session state should render as compact status pills with explicit role styling");
+    require(contains(mainCpp, "primaryButton") && contains(mainCpp, "dangerButton") && contains(mainCpp, "secondaryButton"),
+            "debugger actions should have primary, secondary and destructive visual hierarchy");
+    require(contains(mainCpp, "QFrame#connectionBar") && contains(mainCpp, "QFrame#breakpointEditor") && contains(mainCpp, "border-radius: 6px"),
+            "Qt stylesheet should define distinct professional dark debugger panels");
     require(contains(mainCpp, "breakpointsTable_") && !contains(mainCpp, "watchTable_") && !contains(mainCpp, "slotsTable_"),
             "watch breakpoints and breakpoint slots should be one linked breakpoint list, not two unrelated panes");
     require(contains(mainCpp, "命中详情") && contains(mainCpp, "registersText_") && contains(mainCpp, "stackText_"),
@@ -118,6 +130,8 @@ int main(int argc, char** argv) {
             "PC client CMake must build against Qt6 Widgets");
     require(!contains(pcCMake, "EUI-NEO") && !contains(pcCMake, "eui_neo"),
             "PC client CMake must stop fetching EUI-NEO");
+    require(contains(readme, "Qt Widgets") && contains(readme, "UTF-8") && !contains(readme, "EUI-NEO"),
+            "README should describe the current Qt Widgets client and UTF-8 source encoding policy");
 
     require(contains(workflow, "windows-latest"), "GitHub Actions must build the Windows GUI in the cloud");
     require(contains(workflow, "xc-hwbp-debugger.exe"), "GitHub Actions must verify the packaged exe exists");
