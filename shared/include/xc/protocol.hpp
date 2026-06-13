@@ -5,6 +5,8 @@
 #include <sstream>
 #include <string>
 #include <string_view>
+#include <utility>
+#include <vector>
 
 namespace xc {
 
@@ -73,6 +75,8 @@ struct BreakpointSetRequest {
     std::uint64_t id = 0;
     std::uint32_t slot = 0;
     std::uint64_t address = 0;
+    std::string module;
+    std::uint64_t offset = 0;
     std::string type;
     std::uint32_t size = 0;
     std::string target;
@@ -100,6 +104,26 @@ struct BreakpointRemoveResponse {
     std::uint32_t slot = 0;
     bool enabled = false;
     std::string message;
+    std::string error;
+};
+
+struct HitRecord {
+    std::uint64_t hitCount = 0;
+    std::uint64_t pc = 0;
+    std::uint64_t lr = 0;
+    std::uint64_t sp = 0;
+    std::uint64_t origX0 = 0;
+    std::uint64_t syscallno = 0;
+    std::uint64_t pstate = 0;
+    std::uint32_t fpsr = 0;
+    std::uint32_t fpcr = 0;
+    std::uint64_t x[30]{};
+};
+
+struct RecordsGetResponse {
+    bool ok = false;
+    std::uint32_t slot = 0;
+    std::vector<HitRecord> records;
     std::string error;
 };
 
@@ -196,6 +220,22 @@ inline std::string hexAddress(std::uint64_t address) {
     return out.str();
 }
 
+inline std::string escapeJson(std::string_view value) {
+    std::string out;
+    out.reserve(value.size());
+    for (char c : value) {
+        switch (c) {
+            case '\\': out += "\\\\"; break;
+            case '"': out += "\\\""; break;
+            case '\n': out += "\\n"; break;
+            case '\r': out += "\\r"; break;
+            case '\t': out += "\\t"; break;
+            default: out.push_back(c); break;
+        }
+    }
+    return out;
+}
+
 inline HelloResponse parseHelloResponse(std::string_view json) {
     HelloResponse response;
     response.ok = jsonBoolOrFalse(json, "ok");
@@ -223,6 +263,8 @@ inline BreakpointSetRequest parseBreakpointSetRequest(std::string_view json) {
     request.id = jsonUint64Value(json, "id");
     request.slot = jsonUint32Value(json, "slot");
     request.address = jsonUint64Value(json, "address");
+    request.module = jsonStringValue(json, "module");
+    request.offset = jsonUint64Value(json, "offset");
     request.type = jsonStringValue(json, "type");
     request.size = jsonUint32Value(json, "size");
     request.target = jsonStringValue(json, "target");
@@ -260,6 +302,63 @@ inline BreakpointRemoveResponse parseBreakpointRemoveResponse(std::string_view j
     return response;
 }
 
+inline RecordsGetResponse parseRecordsGetResponse(std::string_view json) {
+    RecordsGetResponse response;
+    response.ok = jsonBoolOrFalse(json, "ok");
+    response.slot = jsonUint32Value(json, "slot");
+    response.error = jsonStringValue(json, "error");
+    if (!response.ok) {
+        return response;
+    }
+
+    const std::string recordsKey = "\"records\":[";
+    const std::size_t recordsStart = json.find(recordsKey);
+    if (recordsStart == std::string_view::npos) {
+        return response;
+    }
+    std::size_t pos = recordsStart + recordsKey.size();
+    while (pos < json.size()) {
+        const std::size_t objectStart = json.find('{', pos);
+        const std::size_t arrayEnd = json.find(']', pos);
+        if (objectStart == std::string_view::npos || (arrayEnd != std::string_view::npos && arrayEnd < objectStart)) {
+            break;
+        }
+        int depth = 0;
+        std::size_t objectEnd = objectStart;
+        for (; objectEnd < json.size(); ++objectEnd) {
+            if (json[objectEnd] == '{') {
+                ++depth;
+            } else if (json[objectEnd] == '}') {
+                --depth;
+                if (depth == 0) {
+                    break;
+                }
+            }
+        }
+        if (objectEnd >= json.size()) {
+            break;
+        }
+
+        const std::string_view recordJson = json.substr(objectStart, objectEnd - objectStart + 1);
+        HitRecord record;
+        record.hitCount = jsonUint64Value(recordJson, "hit_count");
+        record.pc = jsonUint64Value(recordJson, "pc");
+        record.lr = jsonUint64Value(recordJson, "lr");
+        record.sp = jsonUint64Value(recordJson, "sp");
+        record.origX0 = jsonUint64Value(recordJson, "orig_x0");
+        record.syscallno = jsonUint64Value(recordJson, "syscallno");
+        record.pstate = jsonUint64Value(recordJson, "pstate");
+        record.fpsr = jsonUint32Value(recordJson, "fpsr");
+        record.fpcr = jsonUint32Value(recordJson, "fpcr");
+        for (std::uint32_t i = 0; i < 30; ++i) {
+            record.x[i] = jsonUint64Value(recordJson, "x" + std::to_string(i));
+        }
+        response.records.push_back(record);
+        pos = objectEnd + 1;
+    }
+    return response;
+}
+
 inline std::string helloRequestJson(std::uint64_t id) {
     return "{\"id\":" + std::to_string(id) + ",\"cmd\":\"hello\"}";
 }
@@ -270,6 +369,11 @@ inline std::string driverStatusRequestJson(std::uint64_t id) {
 
 inline std::string breakpointInfoRequestJson(std::uint64_t id) {
     return "{\"id\":" + std::to_string(id) + ",\"cmd\":\"breakpoint.info\"}";
+}
+
+inline std::string recordsGetRequestJson(std::uint64_t id, std::uint32_t slot) {
+    return "{\"id\":" + std::to_string(id)
+        + ",\"cmd\":\"records.get\",\"slot\":" + std::to_string(slot) + "}";
 }
 
 inline std::string breakpointRemoveRequestJson(std::uint64_t id, std::uint32_t slot, std::string_view target = {}) {
@@ -286,10 +390,24 @@ inline std::string breakpointSetRequestJson(std::uint64_t id, std::uint32_t slot
     std::string out = "{\"id\":" + std::to_string(id)
         + ",\"cmd\":\"breakpoint.set\",\"slot\":" + std::to_string(slot)
         + ",\"address\":\"" + hexAddress(address)
-        + "\",\"type\":\"" + std::string(type)
+        + "\",\"type\":\"" + escapeJson(type)
         + "\",\"size\":" + std::to_string(size);
     if (!target.empty()) {
-        out += ",\"target\":\"" + std::string(target) + "\"";
+        out += ",\"target\":\"" + escapeJson(target) + "\"";
+    }
+    out += "}";
+    return out;
+}
+
+inline std::string breakpointSetModuleRequestJson(std::uint64_t id, std::uint32_t slot, std::string_view module, std::uint64_t offset, std::string_view type, std::uint32_t size, std::string_view target = {}) {
+    std::string out = "{\"id\":" + std::to_string(id)
+        + ",\"cmd\":\"breakpoint.set\",\"slot\":" + std::to_string(slot)
+        + ",\"module\":\"" + escapeJson(module)
+        + "\",\"offset\":\"" + hexAddress(offset)
+        + "\",\"type\":\"" + escapeJson(type)
+        + "\",\"size\":" + std::to_string(size);
+    if (!target.empty()) {
+        out += ",\"target\":\"" + escapeJson(target) + "\"";
     }
     out += "}";
     return out;

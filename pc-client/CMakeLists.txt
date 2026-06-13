@@ -1,24 +1,19 @@
-include(FetchContent)
-
-FetchContent_Declare(
-    eui_neo
-    GIT_REPOSITORY https://github.com/sudoevolve/EUI-NEO.git
-    GIT_TAG main
-)
-set(EUI_BUILD_APPS OFF CACHE BOOL "" FORCE)
-FetchContent_MakeAvailable(eui_neo)
+find_package(Qt6 REQUIRED COMPONENTS Widgets)
 
 add_executable(xc-hwbp-debugger
-    ${eui_neo_SOURCE_DIR}/core/app/glfw_app_main.cpp
     src/main.cpp
 )
 
-target_link_libraries(xc-hwbp-debugger PRIVATE xc_shared eui::neo)
-eui_neo_configure_app(xc-hwbp-debugger)
+target_link_libraries(xc-hwbp-debugger PRIVATE xc_shared Qt6::Widgets)
 
-install(TARGETS xc-hwbp-debugger RUNTIME DESTINATION .)
-install(DIRECTORY "${eui_neo_SOURCE_DIR}/assets/" DESTINATION assets)
+target_compile_features(xc-hwbp-debugger PRIVATE cxx_std_17)
+
+if(MSVC)
+    target_compile_options(xc-hwbp-debugger PRIVATE /utf-8)
+endif()
 
 if(WIN32)
     target_link_libraries(xc-hwbp-debugger PRIVATE ws2_32)
 endif()
+
+install(TARGETS xc-hwbp-debugger RUNTIME DESTINATION .)
