@@ -5,6 +5,7 @@
 #include <sstream>
 #include <string>
 #include <string_view>
+#include <utility>
 
 namespace xc {
 
@@ -73,6 +74,8 @@ struct BreakpointSetRequest {
     std::uint64_t id = 0;
     std::uint32_t slot = 0;
     std::uint64_t address = 0;
+    std::string module;
+    std::uint64_t offset = 0;
     std::string type;
     std::uint32_t size = 0;
     std::string target;
@@ -196,6 +199,22 @@ inline std::string hexAddress(std::uint64_t address) {
     return out.str();
 }
 
+inline std::string escapeJson(std::string_view value) {
+    std::string out;
+    out.reserve(value.size());
+    for (char c : value) {
+        switch (c) {
+            case '\\': out += "\\\\"; break;
+            case '"': out += "\\\""; break;
+            case '\n': out += "\\n"; break;
+            case '\r': out += "\\r"; break;
+            case '\t': out += "\\t"; break;
+            default: out.push_back(c); break;
+        }
+    }
+    return out;
+}
+
 inline HelloResponse parseHelloResponse(std::string_view json) {
     HelloResponse response;
     response.ok = jsonBoolOrFalse(json, "ok");
@@ -223,6 +242,8 @@ inline BreakpointSetRequest parseBreakpointSetRequest(std::string_view json) {
     request.id = jsonUint64Value(json, "id");
     request.slot = jsonUint32Value(json, "slot");
     request.address = jsonUint64Value(json, "address");
+    request.module = jsonStringValue(json, "module");
+    request.offset = jsonUint64Value(json, "offset");
     request.type = jsonStringValue(json, "type");
     request.size = jsonUint32Value(json, "size");
     request.target = jsonStringValue(json, "target");
@@ -286,10 +307,24 @@ inline std::string breakpointSetRequestJson(std::uint64_t id, std::uint32_t slot
     std::string out = "{\"id\":" + std::to_string(id)
         + ",\"cmd\":\"breakpoint.set\",\"slot\":" + std::to_string(slot)
         + ",\"address\":\"" + hexAddress(address)
-        + "\",\"type\":\"" + std::string(type)
+        + "\",\"type\":\"" + escapeJson(type)
         + "\",\"size\":" + std::to_string(size);
     if (!target.empty()) {
-        out += ",\"target\":\"" + std::string(target) + "\"";
+        out += ",\"target\":\"" + escapeJson(target) + "\"";
+    }
+    out += "}";
+    return out;
+}
+
+inline std::string breakpointSetModuleRequestJson(std::uint64_t id, std::uint32_t slot, std::string_view module, std::uint64_t offset, std::string_view type, std::uint32_t size, std::string_view target = {}) {
+    std::string out = "{\"id\":" + std::to_string(id)
+        + ",\"cmd\":\"breakpoint.set\",\"slot\":" + std::to_string(slot)
+        + ",\"module\":\"" + escapeJson(module)
+        + "\",\"offset\":\"" + hexAddress(offset)
+        + "\",\"type\":\"" + escapeJson(type)
+        + "\",\"size\":" + std::to_string(size);
+    if (!target.empty()) {
+        out += ",\"target\":\"" + escapeJson(target) + "\"";
     }
     out += "}";
     return out;

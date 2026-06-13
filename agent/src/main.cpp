@@ -1,6 +1,7 @@
 #include "xc/protocol.hpp"
 
 #include <arpa/inet.h>
+#include <dirent.h>
 #include <netinet/in.h>
 #include <sys/mman.h>
 #include <sys/prctl.h>
@@ -201,6 +202,126 @@ bool isDigits(const std::string& value) {
     return true;
 }
 
+bool parseHex64(const std::string& text, std::uint64_t& value) {
+    value = 0;
+    if (text.empty()) {
+        return false;
+    }
+    for (char c : text) {
+        unsigned digit = 0;
+        if (c >= '0' && c <= '9') {
+            digit = static_cast<unsigned>(c - '0');
+        } else if (c >= 'a' && c <= 'f') {
+            digit = static_cast<unsigned>(10 + c - 'a');
+        } else if (c >= 'A' && c <= 'F') {
+            digit = static_cast<unsigned>(10 + c - 'A');
+        } else {
+            return false;
+        }
+        value = value * 16ULL + digit;
+    }
+    return true;
+}
+
+bool pathMatchesModule(const std::string& path, const std::string& module) {
+    if (path == module) {
+        return true;
+    }
+    if (path.size() < module.size()) {
+        return false;
+    }
+    const std::size_t start = path.size() - module.size();
+    return path.compare(start, module.size(), module) == 0 && (start == 0 || path[start - 1] == '/');
+}
+
+std::string readProcessName(int pid) {
+    std::string cmdline = readTextFile(("/proc/" + std::to_string(pid) + "/cmdline").c_str());
+    for (char& c : cmdline) {
+        if (c == '\0') {
+            c = ' ';
+        }
+    }
+    while (!cmdline.empty() && cmdline.back() == ' ') {
+        cmdline.pop_back();
+    }
+    if (!cmdline.empty()) {
+        return cmdline;
+    }
+    std::string comm = readTextFile(("/proc/" + std::to_string(pid) + "/comm").c_str());
+    while (!comm.empty() && (comm.back() == '\n' || comm.back() == '\r')) {
+        comm.pop_back();
+    }
+    return comm;
+}
+
+bool findPidByName(const std::string& target, int& pid, std::string& error) {
+    pid = 0;
+    DIR* proc = ::opendir("/proc");
+    if (!proc) {
+        error = std::string("failed to open /proc: ") + std::strerror(errno);
+        return false;
+    }
+    while (dirent* entry = ::readdir(proc)) {
+        const std::string name = entry->d_name;
+        if (!isDigits(name)) {
+            continue;
+        }
+        const int candidate = std::stoi(name);
+        const std::string processName = readProcessName(candidate);
+        if (processName == target || processName.find(target) == 0) {
+            pid = candidate;
+            ::closedir(proc);
+            return true;
+        }
+    }
+    ::closedir(proc);
+    error = "target process not found for module breakpoint: " + target;
+    return false;
+}
+
+bool resolveModuleBaseFromMaps(int pid, const std::string& module, std::uint64_t& base, std::string& error) {
+    if (pid <= 0) {
+        error = "module+offset breakpoint requires a resolved target pid";
+        return false;
+    }
+    std::ifstream maps("/proc/" + std::to_string(pid) + "/maps");
+    if (!maps) {
+        error = "failed to open /proc/" + std::to_string(pid) + "/maps";
+        return false;
+    }
+    std::string line;
+    while (std::getline(maps, line)) {
+        std::istringstream parts(line);
+        std::string range;
+        std::string perms;
+        std::string offset;
+        std::string dev;
+        std::string inode;
+        std::string path;
+        parts >> range >> perms >> offset >> dev >> inode;
+        std::getline(parts, path);
+        while (!path.empty() && (path.front() == ' ' || path.front() == '\t')) {
+            path.erase(path.begin());
+        }
+        const std::size_t dash = range.find('-');
+        std::uint64_t start = 0;
+        if (dash == std::string::npos || !parseHex64(range.substr(0, dash), start)) {
+            continue;
+        }
+        if (pathMatchesModule(path, module) && (perms.find('x') != std::string::npos || base == 0)) {
+            base = start;
+            if (perms.find('x') != std::string::npos) {
+                return true;
+            }
+        }
+    }
+    if (base != 0) {
+        return true;
+    }
+    error = "module not found in target maps: " + module;
+    return false;
+}
+
 std::string jsonBool(bool value) {
     return value ? "true" : "false";
 }
@@ -285,13 +406,24 @@ public:
         if (!prepareTarget(request.target, response.error)) {
             return response;
         }
+        if (!request.module.empty()) {
+            std::uint64_t moduleBase = 0;
+            int mapsPid = req_->pid;
+            if (mapsPid <= 0 && !findPidByName(request.target, mapsPid, response.error)) {
+                return response;
+            }
+            if (!resolveModuleBaseFromMaps(mapsPid, request.module, moduleBase, response.error)) {
+                return response;
+            }
+            response.address = moduleBase + request.offset;
+        }
 
         bpInfo_.points[request.slot].bt = toDriverType(request.type);
         bpInfo_.points[request.slot].bl = static_cast<hwbp_len>(request.size);
         bpInfo_.points[request.slot].bs = SCOPE_ALL_THREADS;
-        bpInfo_.points[request.slot].hit_addr = request.address;
+        bpInfo_.points[request.slot].hit_addr = response.address;
         bpInfo_.points[request.slot].record_count = 0;
-        slots_[request.slot] = BreakpointSlot{true, request.address, request.type, request.size};
+        slots_[request.slot] = BreakpointSlot{true, response.address, request.type, request.size};
         req_->bp_info = bpInfo_;
 
         if (!commit(op_set_process_hwbp)) {
@@ -446,7 +578,7 @@ private:
         if (request.slot >= kMaxBreakpointSlots) {
             return "slot out of range";
         }
-        if (request.address == 0) {
+        if (request.module.empty() && request.address == 0) {
             return "address is zero";
         }
         if (request.type != "execute" && request.type != "read" && request.type != "write" && request.type != "access") {

@@ -52,6 +52,14 @@ int main(int argc, char** argv) {
             "Qt GUI should explicitly use a clear Chinese Windows UI font");
     require(contains(mainCpp, "QSplitter") && contains(mainCpp, "QTableWidget") && contains(mainCpp, "QPlainTextEdit"),
             "Qt GUI should use a fixed debugger layout with splitter, tables and plain text log/stack views");
+    require(contains(mainCpp, "breakpointsTable_") && !contains(mainCpp, "watchTable_") && !contains(mainCpp, "slotsTable_"),
+            "watch breakpoints and breakpoint slots should be one linked breakpoint list, not two unrelated panes");
+    require(contains(mainCpp, "命中详情") && contains(mainCpp, "registersText_") && contains(mainCpp, "stackText_"),
+            "registers and stack should live together in one hit detail area instead of many grid panels");
+    require(contains(mainCpp, "parseBreakpointAddress") && contains(mainCpp, "libtersafe.so+0x488F08"),
+            "breakpoint input should support module.so+offset syntax");
+    require(contains(mainCpp, "typeCombo_->addItems({\"x\", \"r\", \"w\", \"rw\"})") && contains(mainCpp, "protocolTypeForUi"),
+            "breakpoint type selector should use compact x/r/w/rw labels and map them to the wire protocol");
     require(contains(mainCpp, "监视断点") && contains(mainCpp, "硬件断点槽") && contains(mainCpp, "驱动状态"),
             "Qt GUI labels must stay Chinese");
 

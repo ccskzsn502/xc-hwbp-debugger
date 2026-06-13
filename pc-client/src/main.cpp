@@ -9,8 +9,8 @@
 #include <ws2tcpip.h>
 #endif
 
-#include <QApplication>
 #include <QAbstractItemView>
+#include <QApplication>
 #include <QComboBox>
 #include <QFont>
 #include <QFrame>
@@ -33,8 +33,8 @@
 #include <QVBoxLayout>
 #include <QWidget>
 
-#include <cstdint>
 #include <array>
+#include <cstdint>
 #include <string>
 
 #ifndef _WIN32
@@ -48,17 +48,25 @@
 
 namespace {
 
+struct BreakpointAddressInput {
+    bool valid = false;
+    std::uint64_t address = 0;
+    std::string module;
+    std::uint64_t offset = 0;
+};
+
 struct ClientState {
     bool connected = false;
     bool helloOk = false;
     xc::HelloResponse hello;
     std::string endpoint = "192.168.1.10";
     std::string target = "com.tencent.tmgp.sgame";
-    std::uint64_t breakpointAddress = 0;
+    BreakpointAddressInput breakpointInput;
     std::string breakpointType = "execute";
     std::uint32_t breakpointSize = 4;
     xc::DriverStatusResponse driver;
     xc::BreakpointSetResponse breakpoints[4];
+    std::string breakpointLabels[4];
     std::string lastBreakpointInfo;
     std::string lastError = "未连接";
     std::string lastAction = "就绪: 等待连接手机 Agent";
@@ -71,6 +79,104 @@ QString qstr(const std::string& value) {
 
 std::string stdstr(const QString& value) {
     return value.toUtf8().constData();
+}
+
+std::string trimAscii(std::string value) {
+    while (!value.empty() && (value.front() == ' ' || value.front() == '\t')) {
+        value.erase(value.begin());
+    }
+    while (!value.empty() && (value.back() == ' ' || value.back() == '\t')) {
+        value.pop_back();
+    }
+    return value;
+}
+
+bool parseUnsigned64(const std::string& text, std::uint64_t& value) {
+    const std::string input = trimAscii(text);
+    if (input.empty()) {
+        return false;
+    }
+    int base = 10;
+    std::size_t i = 0;
+    if (input.size() > 2 && input[0] == '0' && (input[1] == 'x' || input[1] == 'X')) {
+        base = 16;
+        i = 2;
+    }
+    if (i >= input.size()) {
+        return false;
+    }
+    value = 0;
+    for (; i < input.size(); ++i) {
+        const char c = input[i];
+        unsigned digit = 0;
+        if (c >= '0' && c <= '9') {
+            digit = static_cast<unsigned>(c - '0');
+        } else if (base == 16 && c >= 'a' && c <= 'f') {
+            digit = static_cast<unsigned>(10 + c - 'a');
+        } else if (base == 16 && c >= 'A' && c <= 'F') {
+            digit = static_cast<unsigned>(10 + c - 'A');
+        } else {
+            return false;
+        }
+        if (digit >= static_cast<unsigned>(base)) {
+            return false;
+        }
+        value = value * static_cast<std::uint64_t>(base) + digit;
+    }
+    return true;
+}
+
+BreakpointAddressInput parseBreakpointAddress(const std::string& text) {
+    BreakpointAddressInput parsed;
+    const std::string input = trimAscii(text);
+    const std::size_t plus = input.find('+');
+    if (plus != std::string::npos) {
+        parsed.module = trimAscii(input.substr(0, plus));
+        if (parsed.module.empty() || !parseUnsigned64(input.substr(plus + 1), parsed.offset)) {
+            return parsed;
+        }
+        parsed.valid = true;
+        return parsed;
+    }
+    parsed.valid = parseUnsigned64(input, parsed.address) && parsed.address != 0;
+    return parsed;
+}
+
+std::string displayAddress(const BreakpointAddressInput& input) {
+    if (!input.module.empty()) {
+        return input.module + "+" + xc::hexAddress(input.offset);
+    }
+    return input.address == 0 ? "-" : xc::hexAddress(input.address);
+}
+
+std::string protocolTypeForUi(const QString& value) {
+    const std::string text = stdstr(value).substr(0, 2);
+    if (text == "x") {
+        return "execute";
+    }
+    if (text == "r") {
+        return "read";
+    }
+    if (text == "w") {
+        return "write";
+    }
+    return "access";
+}
+
+QString typeLabel(const std::string& protocolType) {
+    if (protocolType == "execute") {
+        return "x 执行";
+    }
+    if (protocolType == "read") {
+        return "r 读取";
+    }
+    if (protocolType == "write") {
+        return "w 写入";
+    }
+    if (protocolType == "access") {
+        return "rw 读写";
+    }
+    return qstr(protocolType);
 }
 
 #ifdef _WIN32
@@ -192,7 +298,7 @@ bool openAgentSession(const std::string& endpoint, SocketHandle& socket, xc::Hel
 }
 
 std::string jsonError(const std::string& error) {
-    return "{\"ok\":false,\"error\":\"" + error + "\"}";
+    return "{\"ok\":false,\"error\":\"" + xc::escapeJson(error) + "\"}";
 }
 
 QTableWidgetItem* cell(const QString& text) {
@@ -234,12 +340,11 @@ private:
     QLabel* connectionLabel_ = nullptr;
     QLabel* driverLabel_ = nullptr;
     QLabel* errorLabel_ = nullptr;
+    QTableWidget* breakpointsTable_ = nullptr;
     QLabel* emptyDataLabel_ = nullptr;
-    QTableWidget* watchTable_ = nullptr;
-    QTableWidget* slotsTable_ = nullptr;
-    QTableWidget* registersTable_ = nullptr;
-    QPlainTextEdit* infoText_ = nullptr;
+    QPlainTextEdit* registersText_ = nullptr;
     QPlainTextEdit* stackText_ = nullptr;
+    QPlainTextEdit* infoText_ = nullptr;
 
     void buildUi() {
         auto* central = new QWidget;
@@ -250,9 +355,9 @@ private:
         root->addWidget(buildStatusStrip());
 
         auto* splitter = new QSplitter(Qt::Horizontal);
-        splitter->addWidget(buildLeftPane());
-        splitter->addWidget(buildRightPane());
-        splitter->setSizes({290, 1040});
+        splitter->addWidget(buildBreakpointPane());
+        splitter->addWidget(buildHitDetailPane());
+        splitter->setSizes({430, 930});
         splitter->setStretchFactor(0, 0);
         splitter->setStretchFactor(1, 1);
         root->addWidget(splitter, 1);
@@ -273,13 +378,13 @@ private:
         addressEdit_ = new QLineEdit;
         endpointEdit_->setPlaceholderText("手机 IP");
         targetEdit_->setPlaceholderText("包名或 PID");
-        addressEdit_->setPlaceholderText("断点地址，例如 0x...");
+        addressEdit_->setPlaceholderText("绝对地址或 libtersafe.so+0x488F08");
         endpointEdit_->setMinimumWidth(135);
-        targetEdit_->setMinimumWidth(205);
-        addressEdit_->setMinimumWidth(180);
+        targetEdit_->setMinimumWidth(190);
+        addressEdit_->setMinimumWidth(245);
 
         typeCombo_ = new QComboBox;
-        typeCombo_->addItems({"execute", "read", "write", "access"});
+        typeCombo_->addItems({"x", "r", "w", "rw"});
         sizeSpin_ = new QSpinBox;
         sizeSpin_->setRange(1, 8);
         sizeSpin_->setValue(4);
@@ -291,13 +396,13 @@ private:
         auto* probeButton = new QPushButton("检测驱动");
         auto* setButton = new QPushButton("下断");
         auto* removeButton = new QPushButton("删断");
-        auto* infoButton = new QPushButton("查询断点");
+        auto* infoButton = new QPushButton("刷新断点");
 
         layout->addWidget(new QLabel("Agent"));
         layout->addWidget(endpointEdit_);
         layout->addWidget(new QLabel("目标"));
         layout->addWidget(targetEdit_);
-        layout->addWidget(new QLabel("地址"));
+        layout->addWidget(new QLabel("断点"));
         layout->addWidget(addressEdit_);
         layout->addWidget(new QLabel("类型"));
         layout->addWidget(typeCombo_);
@@ -338,83 +443,72 @@ private:
         return frame;
     }
 
-    QWidget* buildLeftPane() {
-        auto* pane = new QWidget;
-        pane->setMinimumWidth(260);
-        pane->setMaximumWidth(340);
-        auto* layout = new QVBoxLayout(pane);
-        layout->setContentsMargins(0, 0, 0, 0);
+    QWidget* buildBreakpointPane() {
+        auto* box = new QGroupBox("断点列表 / 监视断点");
+        box->setMinimumWidth(390);
+        box->setMaximumWidth(520);
+        auto* layout = new QVBoxLayout(box);
+        layout->setContentsMargins(8, 10, 8, 8);
         layout->setSpacing(8);
 
-        watchTable_ = new QTableWidget;
-        setupTable(watchTable_, {"序号", "线程", "状态"});
-        auto* watchBox = new QGroupBox("监视断点");
-        auto* watchLayout = new QVBoxLayout(watchBox);
-        watchLayout->addWidget(watchTable_);
+        auto* hint = new QLabel("同一个列表管理硬件断点槽和命中监视，避免状态分散。");
+        hint->setObjectName("paneHint");
+        breakpointsTable_ = new QTableWidget;
+        setupTable(breakpointsTable_, {"槽", "类型", "模块/偏移", "实际地址", "状态"});
+        breakpointsTable_->horizontalHeader()->setStretchLastSection(false);
+        breakpointsTable_->horizontalHeader()->setSectionResizeMode(0, QHeaderView::ResizeToContents);
+        breakpointsTable_->horizontalHeader()->setSectionResizeMode(1, QHeaderView::ResizeToContents);
+        breakpointsTable_->horizontalHeader()->setSectionResizeMode(2, QHeaderView::Stretch);
+        breakpointsTable_->horizontalHeader()->setSectionResizeMode(3, QHeaderView::ResizeToContents);
+        breakpointsTable_->horizontalHeader()->setSectionResizeMode(4, QHeaderView::ResizeToContents);
 
-        slotsTable_ = new QTableWidget;
-        setupTable(slotsTable_, {"槽", "类型", "地址", "状态"});
-        auto* slotsBox = new QGroupBox("硬件断点槽");
-        auto* slotsLayout = new QVBoxLayout(slotsBox);
-        slotsLayout->addWidget(slotsTable_);
-
-        auto* driverBox = new QGroupBox("驱动状态");
-        auto* driverLayout = new QVBoxLayout(driverBox);
-        driverLayout->addWidget(new QLabel("lsdriver 状态会在连接 Agent 后刷新"));
-        driverLayout->addWidget(new QLabel("启动时不显示任何模拟命中数据"));
-        driverLayout->addStretch(1);
-
-        layout->addWidget(watchBox, 1);
-        layout->addWidget(slotsBox, 2);
-        layout->addWidget(driverBox, 1);
-        return pane;
+        layout->addWidget(hint);
+        layout->addWidget(breakpointsTable_, 1);
+        return box;
     }
 
-    QWidget* buildRightPane() {
-        auto* splitter = new QSplitter(Qt::Vertical);
+    QWidget* buildHitDetailPane() {
+        auto* box = new QGroupBox("命中详情");
+        auto* layout = new QVBoxLayout(box);
+        layout->setContentsMargins(8, 10, 8, 8);
+        layout->setSpacing(8);
 
-        registersTable_ = new QTableWidget;
-        setupTable(registersTable_, {"寄存器", "HEX", "DEC", "说明"});
         emptyDataLabel_ = new QLabel("等待真实断点命中数据");
         emptyDataLabel_->setObjectName("emptyDataLabel");
         emptyDataLabel_->setAlignment(Qt::AlignCenter);
-        emptyDataLabel_->setMinimumHeight(40);
-        auto* dataBox = new QGroupBox("数据视图");
-        auto* dataLayout = new QVBoxLayout(dataBox);
-        dataLayout->addWidget(emptyDataLabel_);
-        dataLayout->addWidget(registersTable_, 1);
+        emptyDataLabel_->setMinimumHeight(38);
 
-        infoText_ = new QPlainTextEdit;
-        infoText_->setReadOnly(true);
-        auto* infoBox = new QGroupBox("断点信息");
-        auto* infoLayout = new QVBoxLayout(infoBox);
-        infoLayout->addWidget(infoText_);
-
+        auto* detailSplitter = new QSplitter(Qt::Vertical);
+        registersText_ = new QPlainTextEdit;
+        registersText_->setReadOnly(true);
+        registersText_->setObjectName("registersText");
         stackText_ = new QPlainTextEdit;
         stackText_->setReadOnly(true);
-        auto* stackBox = new QGroupBox("堆栈");
-        auto* stackLayout = new QVBoxLayout(stackBox);
-        stackLayout->addWidget(stackText_);
+        stackText_->setObjectName("stackText");
+        infoText_ = new QPlainTextEdit;
+        infoText_->setReadOnly(true);
+        infoText_->setObjectName("infoText");
+        detailSplitter->addWidget(registersText_);
+        detailSplitter->addWidget(stackText_);
+        detailSplitter->addWidget(infoText_);
+        detailSplitter->setSizes({290, 210, 170});
 
-        splitter->addWidget(dataBox);
-        splitter->addWidget(infoBox);
-        splitter->addWidget(stackBox);
-        splitter->setSizes({360, 230, 140});
-        return splitter;
+        layout->addWidget(emptyDataLabel_);
+        layout->addWidget(detailSplitter, 1);
+        return box;
     }
 
     bool applyInputs(bool requireAddress) {
         const QString endpoint = endpointEdit_->text().trimmed();
         const QString target = targetEdit_->text().trimmed();
         const QString addressText = addressEdit_->text().trimmed();
-        bool ok = addressText.isEmpty();
-        std::uint64_t address = 0;
+        BreakpointAddressInput input;
         if (!addressText.isEmpty()) {
-            address = addressText.toULongLong(&ok, 0);
+            input = parseBreakpointAddress(stdstr(addressText));
         }
-        if (!ok || (requireAddress && address == 0)) {
+        if (requireAddress && !input.valid) {
             state_.lastError = "请先输入有效断点地址";
-            state_.lastAction = "输入错误: 断点地址需要十进制或 0x 十六进制";
+            state_.lastAction = "输入错误: 支持 0x地址 或 libtersafe.so+0x偏移";
             return false;
         }
 
@@ -424,8 +518,8 @@ private:
         if (!target.isEmpty()) {
             state_.target = stdstr(target);
         }
-        state_.breakpointAddress = address;
-        state_.breakpointType = stdstr(typeCombo_->currentText());
+        state_.breakpointInput = input;
+        state_.breakpointType = protocolTypeForUi(typeCombo_->currentText());
         state_.breakpointSize = static_cast<std::uint32_t>(sizeSpin_->value());
         return true;
     }
@@ -478,8 +572,9 @@ private:
         state_.helloOk = false;
         state_.driver = {};
         state_.lastBreakpointInfo.clear();
-        for (auto& breakpoint : state_.breakpoints) {
-            breakpoint = {};
+        for (int i = 0; i < 4; ++i) {
+            state_.breakpoints[i] = {};
+            state_.breakpointLabels[i].clear();
         }
         state_.lastError = "已断开";
         state_.lastAction = "已断开连接";
@@ -505,7 +600,9 @@ private:
             return;
         }
 
-        const std::string request = xc::breakpointSetRequestJson(state_.requestId++, static_cast<std::uint32_t>(slot), state_.breakpointAddress, state_.breakpointType, state_.breakpointSize, state_.target);
+        const std::string request = state_.breakpointInput.module.empty()
+            ? xc::breakpointSetRequestJson(state_.requestId++, static_cast<std::uint32_t>(slot), state_.breakpointInput.address, state_.breakpointType, state_.breakpointSize, state_.target)
+            : xc::breakpointSetModuleRequestJson(state_.requestId++, static_cast<std::uint32_t>(slot), state_.breakpointInput.module, state_.breakpointInput.offset, state_.breakpointType, state_.breakpointSize, state_.target);
         if (!sendLine(socket, request)) {
             closeSocket(socket);
             state_.lastError = "发送 breakpoint.set 失败";
@@ -524,6 +621,7 @@ private:
 
         const auto response = xc::parseBreakpointSetResponse(responseLine);
         state_.breakpoints[slot] = response;
+        state_.breakpointLabels[slot] = displayAddress(state_.breakpointInput);
         state_.hello = hello;
         state_.helloOk = true;
         state_.connected = true;
@@ -565,6 +663,7 @@ private:
         const auto response = xc::parseBreakpointRemoveResponse(responseLine);
         if (response.ok) {
             state_.breakpoints[slot] = {};
+            state_.breakpointLabels[slot].clear();
         }
         state_.hello = hello;
         state_.helloOk = true;
@@ -628,39 +727,31 @@ private:
         errorLabel_->style()->unpolish(errorLabel_);
         errorLabel_->style()->polish(errorLabel_);
 
-        refreshWatchTable();
-        refreshSlotsTable();
-        registersTable_->setRowCount(0);
+        refreshBreakpointsTable();
         emptyDataLabel_->setText(state_.connected
-            ? "等待真实断点命中数据，当前没有寄存器快照"
+            ? "等待真实断点命中数据，当前没有寄存器和调用栈快照"
             : "等待真实断点命中数据，请先连接 Agent");
+        registersText_->setPlainText("寄存器\n\n等待真实断点命中数据。收到 Agent 返回的 PC/LR/SP/X 寄存器后在这里集中显示。");
+        stackText_->setPlainText("调用栈\n\n暂无真实命中。后续收到 PC/LR/SP 调用链后在这里显示。");
         infoText_->setPlainText(state_.lastBreakpointInfo.empty()
-            ? "等待真实断点命中数据\n\n连接 Agent 并发生硬件断点命中后，这里只显示 Agent 返回的真实数据。"
+            ? "断点信息\n\n只显示 Agent 返回的真实断点和命中信息。启动时不填充模拟数据。"
             : qstr(state_.lastBreakpointInfo));
-        stackText_->setPlainText("等待真实断点命中数据\n暂无真实命中。后续收到 PC/LR/SP 调用链后在这里显示。");
         statusBar()->showMessage(qstr(state_.lastAction));
     }
 
-    void refreshWatchTable() {
-        watchTable_->setRowCount(state_.connected ? 1 : 0);
-        if (!state_.connected) {
-            return;
-        }
-        watchTable_->setItem(0, 0, cell("-"));
-        watchTable_->setItem(0, 1, cell("-"));
-        watchTable_->setItem(0, 2, cell("等待真实断点命中数据"));
-    }
-
-    void refreshSlotsTable() {
-        slotsTable_->setRowCount(4);
+    void refreshBreakpointsTable() {
+        breakpointsTable_->setRowCount(4);
         for (int row = 0; row < 4; ++row) {
             const auto& bp = state_.breakpoints[row];
-            slotsTable_->setItem(row, 0, cell(QString::number(row)));
-            slotsTable_->setItem(row, 1, cell(bp.ok ? qstr(bp.type) : "-"));
-            slotsTable_->setItem(row, 2, cell(bp.ok && bp.address != 0 ? qstr(xc::hexAddress(bp.address)) : "-"));
-            slotsTable_->setItem(row, 3, cell(bp.ok && bp.enabled ? "等待确认" : "空"));
+            const QString label = state_.breakpointLabels[row].empty() ? "-" : qstr(state_.breakpointLabels[row]);
+            breakpointsTable_->setItem(row, 0, cell(QString::number(row)));
+            breakpointsTable_->setItem(row, 1, cell(bp.ok ? typeLabel(bp.type) : "-"));
+            breakpointsTable_->setItem(row, 2, cell(label));
+            breakpointsTable_->setItem(row, 3, cell(bp.ok && bp.address != 0 ? qstr(xc::hexAddress(bp.address)) : "-"));
+            breakpointsTable_->setItem(row, 4, cell(bp.ok && bp.enabled ? "已下断，等待命中" : "空"));
         }
-        slotsTable_->resizeColumnsToContents();
+        breakpointsTable_->resizeColumnsToContents();
+        breakpointsTable_->horizontalHeader()->setSectionResizeMode(2, QHeaderView::Stretch);
     }
 
     void applyStyle() {
@@ -669,6 +760,7 @@ private:
             QFrame#toolbar, QFrame#sessionbar, QStatusBar { background: #20242a; border: 1px solid #313741; }
             QGroupBox { border: 1px solid #333a44; border-radius: 4px; margin-top: 20px; padding: 8px; background: #1b1f24; font-weight: 600; }
             QGroupBox::title { subcontrol-origin: margin; left: 10px; padding: 0 4px; color: #eef3f8; }
+            QLabel#paneHint { color: #9da8b6; }
             QLineEdit, QComboBox, QSpinBox, QPlainTextEdit, QTableWidget { background: #111317; border: 1px solid #343b45; border-radius: 3px; color: #e4e8ee; selection-background-color: #2567a8; }
             QLineEdit, QComboBox, QSpinBox { min-height: 25px; padding: 2px 6px; }
             QPushButton { background: #2b333d; border: 1px solid #44505e; border-radius: 3px; color: #f0f4f8; min-height: 27px; padding: 3px 10px; }
