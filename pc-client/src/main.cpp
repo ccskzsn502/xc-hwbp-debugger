@@ -1,101 +1,76 @@
-#include "eui_neo.h"
-#include "xc/protocol.hpp"
-
-#include <algorithm>
-#include <array>
-#include <atomic>
-#include <cerrno>
-#include <cstdint>
-#include <cstring>
-#include <functional>
-#include <mutex>
-#include <sstream>
-#include <string>
-#include <thread>
-#include <vector>
-
 #ifdef _WIN32
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
 #endif
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
 #include <winsock2.h>
 #include <ws2tcpip.h>
-#else
+#endif
+
+#include <QApplication>
+#include <QAbstractItemView>
+#include <QComboBox>
+#include <QFont>
+#include <QFrame>
+#include <QGroupBox>
+#include <QGuiApplication>
+#include <QHBoxLayout>
+#include <QHeaderView>
+#include <QLabel>
+#include <QLineEdit>
+#include <QMainWindow>
+#include <QPlainTextEdit>
+#include <QPushButton>
+#include <QSpinBox>
+#include <QSplitter>
+#include <QStringList>
+#include <QStatusBar>
+#include <QStyle>
+#include <QTableWidget>
+#include <QTableWidgetItem>
+#include <QVBoxLayout>
+#include <QWidget>
+
+#include <cstdint>
+#include <array>
+#include <string>
+
+#ifndef _WIN32
 #include <arpa/inet.h>
 #include <netinet/in.h>
 #include <sys/socket.h>
 #include <unistd.h>
 #endif
 
-namespace app {
+#include "xc/protocol.hpp"
+
 namespace {
-
-using eui::Color;
-
-constexpr Color kWindow{0.12f, 0.12f, 0.14f, 1.0f};
-constexpr Color kTitlebar{0.95f, 0.95f, 0.95f, 1.0f};
-constexpr Color kTopbar{0.10f, 0.10f, 0.12f, 1.0f};
-constexpr Color kToolbar{0.13f, 0.13f, 0.15f, 1.0f};
-constexpr Color kPanel{0.11f, 0.11f, 0.13f, 1.0f};
-constexpr Color kHeader{0.15f, 0.15f, 0.20f, 1.0f};
-constexpr Color kLine{0.28f, 0.29f, 0.34f, 1.0f};
-constexpr Color kSelect{0.00f, 0.47f, 0.84f, 1.0f};
-constexpr Color kText{0.82f, 0.85f, 0.89f, 1.0f};
-constexpr Color kMuted{0.50f, 0.53f, 0.58f, 1.0f};
-constexpr Color kCyan{0.25f, 0.84f, 1.00f, 1.0f};
-constexpr Color kYellow{0.90f, 0.83f, 0.42f, 1.0f};
-constexpr Color kRed{1.00f, 0.42f, 0.42f, 1.0f};
-constexpr Color kButton{0.15f, 0.15f, 0.20f, 1.0f};
-constexpr Color kInput{0.08f, 0.08f, 0.10f, 1.0f};
-
-float clampWidth(float width) { return std::max(width, 980.0f); }
-float clampHeight(float height) { return std::max(height, 680.0f); }
-
-void rect(eui::Ui& ui, const std::string& id, float x, float y, float w, float h, Color color, Color border = kLine) {
-    ui.rect(id).position(x, y).size(w, h).color(color).border(1.0f, border).build();
-}
-
-void fillRect(eui::Ui& ui, const std::string& id, float x, float y, float w, float h, Color color) {
-    ui.rect(id).position(x, y).size(w, h).color(color).build();
-}
-
-void text(eui::Ui& ui, const std::string& id, float x, float y, const std::string& value, Color color = kText, float size = 14.0f) {
-    ui.text(id).position(x, y).text(value).fontSize(size).color(color).build();
-}
-
-void mono(eui::Ui& ui, const std::string& id, float x, float y, const std::string& value, Color color = kText, float size = 13.0f) {
-    ui.text(id).position(x, y).text(value).fontSize(size).fontFamily("Consolas").color(color).build();
-}
 
 struct ClientState {
     bool connected = false;
     bool helloOk = false;
     xc::HelloResponse hello;
-    xc::DriverStatusResponse driver;
-    xc::BreakpointSetResponse breakpoints[4];
     std::string endpoint = "192.168.1.10";
     std::string target = "com.tencent.tmgp.sgame";
-    std::uint64_t breakpointAddress = 0x78919CFF84ULL;
+    std::uint64_t breakpointAddress = 0;
     std::string breakpointType = "execute";
     std::uint32_t breakpointSize = 4;
+    xc::DriverStatusResponse driver;
+    xc::BreakpointSetResponse breakpoints[4];
+    std::string lastBreakpointInfo;
     std::string lastError = "未连接";
-    std::string lastAction = "就绪: 等待连接手机 agent";
+    std::string lastAction = "就绪: 等待连接手机 Agent";
     std::uint64_t requestId = 1;
 };
 
-ClientState& state() {
-    static ClientState value;
-    return value;
+QString qstr(const std::string& value) {
+    return QString::fromUtf8(value.c_str());
 }
 
-std::mutex& stateMutex() {
-    static std::mutex value;
-    return value;
-}
-
-std::uint64_t nextRequestId() {
-    std::lock_guard<std::mutex> lock(stateMutex());
-    return state().requestId++;
+std::string stdstr(const QString& value) {
+    return value.toUtf8().constData();
 }
 
 #ifdef _WIN32
@@ -175,13 +150,11 @@ SocketHandle connectSocket(const std::string& host, std::uint16_t port, std::str
     if (!ensureSocketRuntime(error)) {
         return kInvalidSocket;
     }
-
-    SocketHandle socketFd = ::socket(AF_INET, SOCK_STREAM, 0);
+    const SocketHandle socketFd = ::socket(AF_INET, SOCK_STREAM, 0);
     if (socketFd == kInvalidSocket) {
         error = "创建 socket 失败";
         return kInvalidSocket;
     }
-
     sockaddr_in address{};
     address.sin_family = AF_INET;
     address.sin_port = htons(port);
@@ -190,601 +163,536 @@ SocketHandle connectSocket(const std::string& host, std::uint16_t port, std::str
         closeSocket(socketFd);
         return kInvalidSocket;
     }
-
     if (::connect(socketFd, reinterpret_cast<sockaddr*>(&address), sizeof(address)) != 0) {
         error = "连接失败: " + host + ":" + std::to_string(port);
         closeSocket(socketFd);
         return kInvalidSocket;
     }
-
     return socketFd;
 }
 
-void connectAndProbeAgent() {
-    ClientState& s = state();
-    s.lastAction = "正在连接 " + s.endpoint + ":" + std::to_string(xc::kDefaultAgentPort);
-    s.connected = false;
-    s.helloOk = false;
-    s.driver = {};
-    s.hello = {};
+bool protocolOk(const xc::HelloResponse& hello) {
+    return hello.ok && hello.protocol == std::string(xc::kProtocolName) && hello.version == xc::kProtocolVersion;
+}
 
-    std::string error;
-    const SocketHandle socket = connectSocket(s.endpoint, xc::kDefaultAgentPort, error);
+bool openAgentSession(const std::string& endpoint, SocketHandle& socket, xc::HelloResponse& hello, std::string& error) {
+    socket = connectSocket(endpoint, xc::kDefaultAgentPort, error);
     if (socket == kInvalidSocket) {
-        s.lastError = error;
-        s.lastAction = "连接失败: " + error;
-        return;
+        return false;
     }
-
     const std::string helloLine = receiveLine(socket, error);
-    if (helloLine.empty()) {
-        s.lastError = error;
-        s.lastAction = "连接失败: " + error;
+    hello = xc::parseHelloResponse(helloLine);
+    if (helloLine.empty() || !protocolOk(hello)) {
+        error = helloLine.empty() ? error : "Agent hello 不匹配: " + helloLine;
         closeSocket(socket);
-        return;
+        socket = kInvalidSocket;
+        return false;
     }
-
-    s.hello = xc::parseHelloResponse(helloLine);
-    s.helloOk = s.hello.ok && s.hello.protocol == xc::kProtocolName && s.hello.version == xc::kProtocolVersion;
-    if (!s.helloOk) {
-        s.lastError = "Agent hello 不匹配: " + helloLine;
-        s.lastAction = "协议握手失败";
-        closeSocket(socket);
-        return;
-    }
-
-    if (!sendLine(socket, xc::driverStatusRequestJson(nextRequestId()))) {
-        s.lastError = "发送 driver.status 失败";
-        s.lastAction = "驱动检测请求失败";
-        closeSocket(socket);
-        return;
-    }
-
-    const std::string statusLine = receiveLine(socket, error);
-    if (statusLine.empty()) {
-        s.lastError = error;
-        s.lastAction = "驱动检测失败: " + error;
-        closeSocket(socket);
-        return;
-    }
-
-    s.driver = xc::parseDriverStatusResponse(statusLine);
-    s.connected = true;
-    s.lastError.clear();
-    s.lastAction = s.driver.ok ? "已连接 Agent，驱动状态已刷新" : "已连接 Agent，但驱动状态返回错误";
-    closeSocket(socket);
+    return true;
 }
 
-void setBreakpointSlot(std::uint32_t slot) {
-    ClientState& s = state();
-    s.lastAction = "正在写入硬件断点 slot" + std::to_string(slot);
-
-    std::string error;
-    const SocketHandle socket = connectSocket(s.endpoint, xc::kDefaultAgentPort, error);
-    if (socket == kInvalidSocket) {
-        s.lastError = error;
-        s.lastAction = "下断失败: " + error;
-        return;
-    }
-
-    const std::string helloLine = receiveLine(socket, error);
-    const xc::HelloResponse hello = xc::parseHelloResponse(helloLine);
-    if (!hello.ok || hello.protocol != xc::kProtocolName || hello.version != xc::kProtocolVersion) {
-        s.lastError = helloLine.empty() ? error : "Agent hello 不匹配: " + helloLine;
-        s.lastAction = "下断失败: 协议握手失败";
-        closeSocket(socket);
-        return;
-    }
-
-    const std::uint64_t requestId = nextRequestId();
-    const std::string request = xc::breakpointSetRequestJson(requestId, slot, s.breakpointAddress, s.breakpointType, s.breakpointSize, s.target);
-    if (!sendLine(socket, request)) {
-        s.lastError = "发送 breakpoint.set 失败";
-        s.lastAction = "下断请求发送失败";
-        closeSocket(socket);
-        return;
-    }
-
-    const std::string responseLine = receiveLine(socket, error);
-    if (responseLine.empty()) {
-        s.lastError = error;
-        s.lastAction = "下断失败: " + error;
-        closeSocket(socket);
-        return;
-    }
-
-    const xc::BreakpointSetResponse response = xc::parseBreakpointSetResponse(responseLine);
-    if (slot < 4) {
-        s.breakpoints[slot] = response;
-    }
-    s.connected = true;
-    s.hello = hello;
-    s.helloOk = true;
-    s.lastError = response.ok ? "" : response.error;
-    s.lastAction = response.ok ? response.message : "下断失败: " + response.error;
-    closeSocket(socket);
+std::string jsonError(const std::string& error) {
+    return "{\"ok\":false,\"error\":\"" + error + "\"}";
 }
 
-void removeBreakpointSlot(std::uint32_t slot) {
-    ClientState& s = state();
-    s.lastAction = "正在删除硬件断点 slot" + std::to_string(slot);
-
-    std::string error;
-    const SocketHandle socket = connectSocket(s.endpoint, xc::kDefaultAgentPort, error);
-    if (socket == kInvalidSocket) {
-        s.lastError = error;
-        s.lastAction = "删断失败: " + error;
-        return;
-    }
-
-    const std::string helloLine = receiveLine(socket, error);
-    const xc::HelloResponse hello = xc::parseHelloResponse(helloLine);
-    if (!hello.ok || hello.protocol != xc::kProtocolName || hello.version != xc::kProtocolVersion) {
-        s.lastError = helloLine.empty() ? error : "Agent hello 不匹配: " + helloLine;
-        s.lastAction = "删断失败: 协议握手失败";
-        closeSocket(socket);
-        return;
-    }
-
-    const std::uint64_t requestId = nextRequestId();
-    const std::string request = xc::breakpointRemoveRequestJson(requestId, slot, s.target);
-    if (!sendLine(socket, request)) {
-        s.lastError = "发送 breakpoint.remove 失败";
-        s.lastAction = "删断请求发送失败";
-        closeSocket(socket);
-        return;
-    }
-
-    const std::string responseLine = receiveLine(socket, error);
-    if (responseLine.empty()) {
-        s.lastError = error;
-        s.lastAction = "删断失败: " + error;
-        closeSocket(socket);
-        return;
-    }
-
-    const xc::BreakpointRemoveResponse response = xc::parseBreakpointRemoveResponse(responseLine);
-    if (response.ok && slot < 4) {
-        s.breakpoints[slot] = {};
-    }
-    s.connected = true;
-    s.hello = hello;
-    s.helloOk = true;
-    s.lastError = response.ok ? "" : response.error;
-    s.lastAction = response.ok ? response.message : "删断失败: " + response.error;
-    closeSocket(socket);
+QTableWidgetItem* cell(const QString& text) {
+    auto* item = new QTableWidgetItem(text);
+    item->setFlags(item->flags() & ~Qt::ItemIsEditable);
+    return item;
 }
 
-std::string jsonEscape(const std::string& value);
-
-std::string queryBreakpointInfoRaw() {
-    ClientState& s = state();
-    s.lastAction = "正在查询硬件断点信息";
-
-    std::string error;
-    const SocketHandle socket = connectSocket(s.endpoint, xc::kDefaultAgentPort, error);
-    if (socket == kInvalidSocket) {
-        s.lastError = error;
-        s.lastAction = "查询断点失败: " + error;
-        return "{\"ok\":false,\"error\":\"" + jsonEscape(error) + "\"}";
-    }
-
-    const std::string helloLine = receiveLine(socket, error);
-    const xc::HelloResponse hello = xc::parseHelloResponse(helloLine);
-    if (!hello.ok || hello.protocol != xc::kProtocolName || hello.version != xc::kProtocolVersion) {
-        const std::string message = helloLine.empty() ? error : "Agent hello 不匹配: " + helloLine;
-        s.lastError = message;
-        s.lastAction = "查询断点失败: 协议握手失败";
-        closeSocket(socket);
-        return "{\"ok\":false,\"error\":\"" + jsonEscape(message) + "\"}";
-    }
-
-    if (!sendLine(socket, xc::breakpointInfoRequestJson(nextRequestId()))) {
-        s.lastError = "发送 breakpoint.info 失败";
-        s.lastAction = "查询断点请求发送失败";
-        closeSocket(socket);
-        return "{\"ok\":false,\"error\":\"发送 breakpoint.info 失败\"}";
-    }
-
-    const std::string responseLine = receiveLine(socket, error);
-    closeSocket(socket);
-    if (responseLine.empty()) {
-        s.lastError = error;
-        s.lastAction = "查询断点失败: " + error;
-        return "{\"ok\":false,\"error\":\"" + jsonEscape(error) + "\"}";
-    }
-
-    s.connected = true;
-    s.hello = hello;
-    s.helloOk = true;
-    s.lastError.clear();
-    s.lastAction = "硬件断点信息已刷新";
-    return responseLine;
+void setupTable(QTableWidget* table, const QStringList& headers) {
+    table->setColumnCount(headers.size());
+    table->setHorizontalHeaderLabels(headers);
+    table->verticalHeader()->setVisible(false);
+    table->horizontalHeader()->setStretchLastSection(true);
+    table->setSelectionBehavior(QAbstractItemView::SelectRows);
+    table->setSelectionMode(QAbstractItemView::SingleSelection);
+    table->setEditTriggers(QAbstractItemView::NoEditTriggers);
+    table->setAlternatingRowColors(true);
+    table->setShowGrid(false);
 }
 
+class DebuggerWindow final : public QMainWindow {
+public:
+    DebuggerWindow() {
+        setWindowTitle("XC 硬件断点调试器");
+        resize(1360, 780);
+        setMinimumSize(1040, 680);
+        buildUi();
+        refreshUi();
+    }
 
-std::string jsonEscape(const std::string& value) {
-    std::string out;
-    out.reserve(value.size());
-    for (char c : value) {
-        switch (c) {
-            case '\\': out += "\\\\"; break;
-            case '"': out += "\\\""; break;
-            case '\n': out += "\\n"; break;
-            case '\r': out += "\\r"; break;
-            case '\t': out += "\\t"; break;
-            default: out.push_back(c); break;
+private:
+    ClientState state_;
+    QLineEdit* endpointEdit_ = nullptr;
+    QLineEdit* targetEdit_ = nullptr;
+    QLineEdit* addressEdit_ = nullptr;
+    QComboBox* typeCombo_ = nullptr;
+    QSpinBox* sizeSpin_ = nullptr;
+    QSpinBox* slotSpin_ = nullptr;
+    QLabel* connectionLabel_ = nullptr;
+    QLabel* driverLabel_ = nullptr;
+    QLabel* errorLabel_ = nullptr;
+    QLabel* emptyDataLabel_ = nullptr;
+    QTableWidget* watchTable_ = nullptr;
+    QTableWidget* slotsTable_ = nullptr;
+    QTableWidget* registersTable_ = nullptr;
+    QPlainTextEdit* infoText_ = nullptr;
+    QPlainTextEdit* stackText_ = nullptr;
+
+    void buildUi() {
+        auto* central = new QWidget;
+        auto* root = new QVBoxLayout(central);
+        root->setContentsMargins(10, 10, 10, 8);
+        root->setSpacing(8);
+        root->addWidget(buildToolbar());
+        root->addWidget(buildStatusStrip());
+
+        auto* splitter = new QSplitter(Qt::Horizontal);
+        splitter->addWidget(buildLeftPane());
+        splitter->addWidget(buildRightPane());
+        splitter->setSizes({290, 1040});
+        splitter->setStretchFactor(0, 0);
+        splitter->setStretchFactor(1, 1);
+        root->addWidget(splitter, 1);
+
+        setCentralWidget(central);
+        applyStyle();
+    }
+
+    QWidget* buildToolbar() {
+        auto* frame = new QFrame;
+        frame->setObjectName("toolbar");
+        auto* layout = new QHBoxLayout(frame);
+        layout->setContentsMargins(10, 8, 10, 8);
+        layout->setSpacing(8);
+
+        endpointEdit_ = new QLineEdit(qstr(state_.endpoint));
+        targetEdit_ = new QLineEdit(qstr(state_.target));
+        addressEdit_ = new QLineEdit;
+        endpointEdit_->setPlaceholderText("手机 IP");
+        targetEdit_->setPlaceholderText("包名或 PID");
+        addressEdit_->setPlaceholderText("断点地址，例如 0x...");
+        endpointEdit_->setMinimumWidth(135);
+        targetEdit_->setMinimumWidth(205);
+        addressEdit_->setMinimumWidth(180);
+
+        typeCombo_ = new QComboBox;
+        typeCombo_->addItems({"execute", "read", "write", "access"});
+        sizeSpin_ = new QSpinBox;
+        sizeSpin_->setRange(1, 8);
+        sizeSpin_->setValue(4);
+        slotSpin_ = new QSpinBox;
+        slotSpin_->setRange(0, 3);
+
+        auto* connectButton = new QPushButton("连接");
+        auto* disconnectButton = new QPushButton("断开");
+        auto* probeButton = new QPushButton("检测驱动");
+        auto* setButton = new QPushButton("下断");
+        auto* removeButton = new QPushButton("删断");
+        auto* infoButton = new QPushButton("查询断点");
+
+        layout->addWidget(new QLabel("Agent"));
+        layout->addWidget(endpointEdit_);
+        layout->addWidget(new QLabel("目标"));
+        layout->addWidget(targetEdit_);
+        layout->addWidget(new QLabel("地址"));
+        layout->addWidget(addressEdit_);
+        layout->addWidget(new QLabel("类型"));
+        layout->addWidget(typeCombo_);
+        layout->addWidget(new QLabel("长度"));
+        layout->addWidget(sizeSpin_);
+        layout->addWidget(new QLabel("槽"));
+        layout->addWidget(slotSpin_);
+        layout->addWidget(connectButton);
+        layout->addWidget(disconnectButton);
+        layout->addWidget(probeButton);
+        layout->addWidget(setButton);
+        layout->addWidget(removeButton);
+        layout->addWidget(infoButton);
+        layout->addStretch(1);
+
+        connect(connectButton, &QPushButton::clicked, this, [this] { markConnected(); });
+        connect(probeButton, &QPushButton::clicked, this, [this] { markConnected(); });
+        connect(disconnectButton, &QPushButton::clicked, this, [this] { disconnectAgent(); });
+        connect(setButton, &QPushButton::clicked, this, [this] { setBreakpoint(); });
+        connect(removeButton, &QPushButton::clicked, this, [this] { removeBreakpoint(); });
+        connect(infoButton, &QPushButton::clicked, this, [this] { queryBreakpointInfo(); });
+        return frame;
+    }
+
+    QWidget* buildStatusStrip() {
+        auto* frame = new QFrame;
+        frame->setObjectName("sessionbar");
+        auto* layout = new QHBoxLayout(frame);
+        layout->setContentsMargins(10, 6, 10, 6);
+        layout->setSpacing(18);
+
+        connectionLabel_ = new QLabel;
+        driverLabel_ = new QLabel;
+        errorLabel_ = new QLabel;
+        layout->addWidget(connectionLabel_);
+        layout->addWidget(driverLabel_, 1);
+        layout->addWidget(errorLabel_, 1);
+        return frame;
+    }
+
+    QWidget* buildLeftPane() {
+        auto* pane = new QWidget;
+        pane->setMinimumWidth(260);
+        pane->setMaximumWidth(340);
+        auto* layout = new QVBoxLayout(pane);
+        layout->setContentsMargins(0, 0, 0, 0);
+        layout->setSpacing(8);
+
+        watchTable_ = new QTableWidget;
+        setupTable(watchTable_, {"序号", "线程", "状态"});
+        auto* watchBox = new QGroupBox("监视断点");
+        auto* watchLayout = new QVBoxLayout(watchBox);
+        watchLayout->addWidget(watchTable_);
+
+        slotsTable_ = new QTableWidget;
+        setupTable(slotsTable_, {"槽", "类型", "地址", "状态"});
+        auto* slotsBox = new QGroupBox("硬件断点槽");
+        auto* slotsLayout = new QVBoxLayout(slotsBox);
+        slotsLayout->addWidget(slotsTable_);
+
+        auto* driverBox = new QGroupBox("驱动状态");
+        auto* driverLayout = new QVBoxLayout(driverBox);
+        driverLayout->addWidget(new QLabel("lsdriver 状态会在连接 Agent 后刷新"));
+        driverLayout->addWidget(new QLabel("启动时不显示任何模拟命中数据"));
+        driverLayout->addStretch(1);
+
+        layout->addWidget(watchBox, 1);
+        layout->addWidget(slotsBox, 2);
+        layout->addWidget(driverBox, 1);
+        return pane;
+    }
+
+    QWidget* buildRightPane() {
+        auto* splitter = new QSplitter(Qt::Vertical);
+
+        registersTable_ = new QTableWidget;
+        setupTable(registersTable_, {"寄存器", "HEX", "DEC", "说明"});
+        emptyDataLabel_ = new QLabel("等待真实断点命中数据");
+        emptyDataLabel_->setObjectName("emptyDataLabel");
+        emptyDataLabel_->setAlignment(Qt::AlignCenter);
+        emptyDataLabel_->setMinimumHeight(40);
+        auto* dataBox = new QGroupBox("数据视图");
+        auto* dataLayout = new QVBoxLayout(dataBox);
+        dataLayout->addWidget(emptyDataLabel_);
+        dataLayout->addWidget(registersTable_, 1);
+
+        infoText_ = new QPlainTextEdit;
+        infoText_->setReadOnly(true);
+        auto* infoBox = new QGroupBox("断点信息");
+        auto* infoLayout = new QVBoxLayout(infoBox);
+        infoLayout->addWidget(infoText_);
+
+        stackText_ = new QPlainTextEdit;
+        stackText_->setReadOnly(true);
+        auto* stackBox = new QGroupBox("堆栈");
+        auto* stackLayout = new QVBoxLayout(stackBox);
+        stackLayout->addWidget(stackText_);
+
+        splitter->addWidget(dataBox);
+        splitter->addWidget(infoBox);
+        splitter->addWidget(stackBox);
+        splitter->setSizes({360, 230, 140});
+        return splitter;
+    }
+
+    bool applyInputs(bool requireAddress) {
+        const QString endpoint = endpointEdit_->text().trimmed();
+        const QString target = targetEdit_->text().trimmed();
+        const QString addressText = addressEdit_->text().trimmed();
+        bool ok = addressText.isEmpty();
+        std::uint64_t address = 0;
+        if (!addressText.isEmpty()) {
+            address = addressText.toULongLong(&ok, 0);
         }
-    }
-    return out;
-}
-
-std::string boolJson(bool value) {
-    return value ? "true" : "false";
-}
-
-std::string stateJson() {
-    ClientState snapshot;
-    {
-        std::lock_guard<std::mutex> lock(stateMutex());
-        snapshot = state();
-    }
-
-    std::ostringstream out;
-    out << "{\"connected\":" << boolJson(snapshot.connected)
-        << ",\"hello_ok\":" << boolJson(snapshot.helloOk)
-        << ",\"endpoint\":\"" << jsonEscape(snapshot.endpoint) << "\""
-        << ",\"target\":\"" << jsonEscape(snapshot.target) << "\""
-        << ",\"breakpoint_address\":\"" << xc::hexAddress(snapshot.breakpointAddress) << "\""
-        << ",\"breakpoint_type\":\"" << jsonEscape(snapshot.breakpointType) << "\""
-        << ",\"breakpoint_size\":" << snapshot.breakpointSize
-        << ",\"last_action\":\"" << jsonEscape(snapshot.lastAction) << "\""
-        << ",\"last_error\":\"" << jsonEscape(snapshot.lastError) << "\""
-        << ",\"driver\":{\"module_loaded\":" << boolJson(snapshot.driver.moduleLoaded)
-        << ",\"proc_modules_readable\":" << boolJson(snapshot.driver.procModulesReadable)
-        << ",\"kernel_release\":\"" << jsonEscape(snapshot.driver.kernelRelease) << "\""
-        << ",\"message\":\"" << jsonEscape(snapshot.driver.message) << "\"}"
-        << ",\"breakpoints\":[";
-    for (std::size_t i = 0; i < 4; ++i) {
-        const auto& bp = snapshot.breakpoints[i];
-        if (i != 0) {
-            out << ",";
+        if (!ok || (requireAddress && address == 0)) {
+            state_.lastError = "请先输入有效断点地址";
+            state_.lastAction = "输入错误: 断点地址需要十进制或 0x 十六进制";
+            return false;
         }
-        out << "{\"slot\":" << i
-            << ",\"ok\":" << boolJson(bp.ok)
-            << ",\"enabled\":" << boolJson(bp.enabled)
-            << ",\"address\":\"" << xc::hexAddress(bp.address) << "\""
-            << ",\"type\":\"" << jsonEscape(bp.type) << "\""
-            << ",\"size\":" << bp.size
-            << ",\"message\":\"" << jsonEscape(bp.message) << "\""
-            << ",\"error\":\"" << jsonEscape(bp.error) << "\"}";
-    }
-    out << "]}";
-    return out.str();
-}
 
-void applyMcpArguments(const std::string& json) {
-    std::lock_guard<std::mutex> lock(stateMutex());
-    ClientState& s = state();
-    const std::string endpoint = xc::jsonStringValue(json, "endpoint");
-    if (!endpoint.empty()) {
-        s.endpoint = endpoint;
-    }
-    const std::string target = xc::jsonStringValue(json, "target");
-    if (!target.empty()) {
-        s.target = target;
-    }
-    const std::uint64_t address = xc::jsonUint64Value(json, "address");
-    if (address != 0) {
-        s.breakpointAddress = address;
-    }
-    const std::string type = xc::jsonStringValue(json, "type");
-    if (!type.empty()) {
-        s.breakpointType = type;
-    }
-    const std::uint32_t size = xc::jsonUint32Value(json, "size");
-    if (size != 0) {
-        s.breakpointSize = size;
-    }
-}
-
-void disconnectAgent() {
-    ClientState& s = state();
-    s.connected = false;
-    s.helloOk = false;
-    s.hello = {};
-    s.driver = {};
-    for (auto& breakpoint : s.breakpoints) {
-        breakpoint = {};
-    }
-    s.lastError = "已断开";
-    s.lastAction = "已断开连接";
-}
-
-void button(eui::Ui& ui, const std::string& id, float x, float y, float w, const std::string& label, std::function<void()> onClick = {}) {
-    auto builder = ui.rect(id + ".bg").position(x, y).size(w, 22.0f).color(kButton).border(1.0f, kLine);
-    if (onClick) {
-        builder.onClick(std::move(onClick));
-    }
-    builder.build();
-    text(ui, id + ".label", x + 14.0f, y + 3.0f, label, kText, 13.0f);
-}
-
-void panel(eui::Ui& ui, const std::string& id, float x, float y, float w, float h, const std::string& title) {
-    rect(ui, id, x, y, w, h, kPanel, kLine);
-    fillRect(ui, id + ".header", x, y, w, 26.0f, kHeader);
-    text(ui, id + ".title", x + 10.0f, y + 4.0f, title, kText, 15.0f);
-}
-
-std::string breakpointSlotLine(std::uint32_t slot, const xc::BreakpointSetResponse& bp) {
-    if (!bp.ok) {
-        return std::to_string(slot) + "  -     -           空";
-    }
-    return std::to_string(slot) + "  " + bp.type + "  " + xc::hexAddress(bp.address) + "  开启";
-}
-
-std::vector<std::string> registerLines() {
-    return {
-        "x0   0000000000000058   DEC:88           HEX:0x58",
-        "x1   0000007A42869674   DEC:525102126708 HEX:0x7A42869674   [stack]+0xF7674",
-        "x2   0000000000000000   DEC:0            HEX:0x0",
-        "x3   0000000000000000   DEC:0            HEX:0x0",
-        "x4   0000000000000000   DEC:0            HEX:0x0",
-        "x5   0000000000006123   DEC:24867        HEX:0x6123",
-        "x6   00000000000001AA   DEC:426          HEX:0x1AA",
-        "x7   0000000000006123   DEC:24867        HEX:0x6123",
-        "x8   164610C9BA59984E   DEC:866414860366 HEX:0x164610C9BA59984E",
-        "x9   0000000000000000   DEC:0            HEX:0x0",
-        "x10  00000000EE7E1856   DEC:4001241174   HEX:0xEE7E1856",
-        "x11  0000007891D4ED30   DEC:517842726192 HEX:0x7891D4ED30   libdemo.so+0x53BD30",
-        "x12  00000000102D7F70   DEC:27141720     HEX:0x102D7F70",
-        "x13  00000000000004E7   DEC:1255         HEX:0x4E7",
-        "x14  00000007C0000360   DEC:532575945568 HEX:0x7C0000360    [cfi shadow]+0x6984D360",
-        "x15  000000000CAA098E   DEC:3298859199   HEX:0xCAA098E",
-        "x16  0000007891D2FD20   DEC:517842599200 HEX:0x7891D2FD20   libdemo.so+0x51CD20",
-        "x17  00000078919CFF84   DEC:517839060868 HEX:0x78919CFF84   libdemo.so+0x1BCF84",
-        "x18  00000077FDD4C000   DEC:515359686656 HEX:0x77FDD4C000",
-        "x19  0000007A42869A80   DEC:525102127744 HEX:0x7A42869A80   [stack]+0xF7A80",
-        "x20  0000007A42869730   DEC:525102126896 HEX:0x7A42869730   [stack]+0xF7730",
-        "x21  0000007A42869730   DEC:525102126896 HEX:0x7A42869730   [stack]+0xF7730",
-        "x22  00000000000071C5   DEC:29125        HEX:0x71C5",
-        "x23  0000000000007731   DEC:30513        HEX:0x7731",
-        "x24  0000007A42869730   DEC:525102126896 HEX:0x7A42869730   [stack]+0xF7730",
-        "x25  0000007A42869730   DEC:525102126896 HEX:0x7A42869730   [stack]+0xF7730",
-        "x26  0000007A42869A70   DEC:525102127728 HEX:0x7A42869A70   [stack]+0xF7A70",
-        "x27  00000000000FC000   DEC:1032192      HEX:0xFC000",
-        "x28  0000007A42771000   DEC:525101103248 HEX:0x7A42771000   [stack]+0x0",
-        "x29  0000007A42869690   DEC:525102126736 HEX:0x7A42869690   [stack]+0xF7690",
-        "x30  0000007891B08068   DEC:517840339048 HEX:0x7891B08068   libdemo.so+0x2F5068",
-        "SP   0000007A42869670   DEC:525102126704 HEX:0x7A42869670   [stack]+0xF7670",
-        "PC   00000078919CFF84   DEC:517839060868 HEX:0x78919CFF84   libdemo.so+0x1BCF84"
-    };
-}
-
-
-std::string mcpToolsListJson(std::uint64_t id) {
-    return "{\"jsonrpc\":\"2.0\",\"id\":" + std::to_string(id)
-        + ",\"result\":{\"tools\":["
-        "{\"name\":\"get_state\",\"description\":\"Read PC client, agent and breakpoint state\",\"inputSchema\":{\"type\":\"object\",\"properties\":{}}},"
-        "{\"name\":\"connect_agent\",\"description\":\"Connect to Android agent and refresh driver status\",\"inputSchema\":{\"type\":\"object\",\"properties\":{\"endpoint\":{\"type\":\"string\"}}}},"
-        "{\"name\":\"driver_status\",\"description\":\"Refresh lsdriver status through agent\",\"inputSchema\":{\"type\":\"object\",\"properties\":{\"endpoint\":{\"type\":\"string\"}}}},"
-        "{\"name\":\"breakpoint_set\",\"description\":\"Set hardware breakpoint through lsdriver\",\"inputSchema\":{\"type\":\"object\",\"properties\":{\"slot\":{\"type\":\"integer\"},\"address\":{\"type\":\"string\"},\"target\":{\"type\":\"string\"},\"type\":{\"type\":\"string\"},\"size\":{\"type\":\"integer\"}}}},"
-        "{\"name\":\"breakpoint_remove\",\"description\":\"Remove hardware breakpoint through lsdriver\",\"inputSchema\":{\"type\":\"object\",\"properties\":{\"slot\":{\"type\":\"integer\"},\"target\":{\"type\":\"string\"}}}},"
-        "{\"name\":\"breakpoint_info\",\"description\":\"Read raw breakpoint/register-hit info from agent\",\"inputSchema\":{\"type\":\"object\",\"properties\":{\"endpoint\":{\"type\":\"string\"}}}}]}}";
-}
-
-std::string mcpResultJson(std::uint64_t id, const std::string& text) {
-    return "{\"jsonrpc\":\"2.0\",\"id\":" + std::to_string(id)
-        + ",\"result\":{\"content\":[{\"type\":\"text\",\"text\":\""
-        + jsonEscape(text) + "\"}]}}";
-}
-
-std::string mcpErrorJson(std::uint64_t id, int code, const std::string& message) {
-    return "{\"jsonrpc\":\"2.0\",\"id\":" + std::to_string(id)
-        + ",\"error\":{\"code\":" + std::to_string(code)
-        + ",\"message\":\"" + jsonEscape(message) + "\"}}";
-}
-
-std::string handleMcpRequest(const std::string& line) {
-    const std::uint64_t id = xc::jsonUint64Value(line, "id");
-    const std::string method = xc::jsonStringValue(line, "method");
-    if (method == "initialize") {
-        return "{\"jsonrpc\":\"2.0\",\"id\":" + std::to_string(id)
-            + ",\"result\":{\"protocolVersion\":\"2024-11-05\",\"serverInfo\":{\"name\":\"xc-hwbp-debugger-pc\",\"version\":\"0.1.0\"},\"capabilities\":{\"tools\":{}}}}";
-    }
-    if (method == "notifications/initialized") {
-        return {};
-    }
-    if (method == "tools/list") {
-        return mcpToolsListJson(id);
-    }
-    if (method != "tools/call") {
-        return mcpErrorJson(id, -32601, "unknown MCP method: " + method);
-    }
-
-    const std::string name = xc::jsonStringValue(line, "name");
-    if (name == "get_state") {
-        return mcpResultJson(id, stateJson());
-    }
-    if (name == "connect_agent" || name == "driver_status") {
-        applyMcpArguments(line);
-        connectAndProbeAgent();
-        return mcpResultJson(id, stateJson());
-    }
-    if (name == "breakpoint_set") {
-        applyMcpArguments(line);
-        const std::uint32_t slot = xc::jsonUint32Value(line, "slot");
-        setBreakpointSlot(slot);
-        return mcpResultJson(id, stateJson());
-    }
-    if (name == "breakpoint_remove") {
-        applyMcpArguments(line);
-        const std::uint32_t slot = xc::jsonUint32Value(line, "slot");
-        removeBreakpointSlot(slot);
-        return mcpResultJson(id, stateJson());
-    }
-    if (name == "breakpoint_info") {
-        applyMcpArguments(line);
-        return mcpResultJson(id, queryBreakpointInfoRaw());
-    }
-    return mcpErrorJson(id, -32602, "unknown tool: " + name);
-}
-
-void mcpClientLoop(SocketHandle client) {
-    std::string error;
-    for (;;) {
-        const std::string line = receiveLine(client, error);
-        if (line.empty()) {
-            break;
+        if (!endpoint.isEmpty()) {
+            state_.endpoint = stdstr(endpoint);
         }
-        const std::string response = handleMcpRequest(line);
-        if (!response.empty() && !sendLine(client, response)) {
-            break;
+        if (!target.isEmpty()) {
+            state_.target = stdstr(target);
         }
+        state_.breakpointAddress = address;
+        state_.breakpointType = stdstr(typeCombo_->currentText());
+        state_.breakpointSize = static_cast<std::uint32_t>(sizeSpin_->value());
+        return true;
     }
-    closeSocket(client);
-}
 
-void mcpServerLoop() {
-    std::string error;
-    if (!ensureSocketRuntime(error)) {
-        return;
-    }
-    const SocketHandle server = ::socket(AF_INET, SOCK_STREAM, 0);
-    if (server == kInvalidSocket) {
-        return;
-    }
-    int one = 1;
-#ifdef _WIN32
-    setsockopt(server, SOL_SOCKET, SO_REUSEADDR, reinterpret_cast<const char*>(&one), sizeof(one));
-#else
-    setsockopt(server, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one));
-#endif
-    sockaddr_in address{};
-    address.sin_family = AF_INET;
-    address.sin_port = htons(23947);
-    address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
-    if (::bind(server, reinterpret_cast<sockaddr*>(&address), sizeof(address)) != 0) {
-        closeSocket(server);
-        return;
-    }
-    if (::listen(server, 8) != 0) {
-        closeSocket(server);
-        return;
-    }
-    for (;;) {
-        sockaddr_in clientAddress{};
-#ifdef _WIN32
-        int len = sizeof(clientAddress);
-#else
-        socklen_t len = sizeof(clientAddress);
-#endif
-        const SocketHandle client = ::accept(server, reinterpret_cast<sockaddr*>(&clientAddress), &len);
-        if (client == kInvalidSocket) {
-            continue;
+    void markConnected() {
+        applyInputs(false);
+        state_.lastAction = "正在连接 " + state_.endpoint + ":" + std::to_string(xc::kDefaultAgentPort);
+        refreshUi();
+
+        SocketHandle socket = kInvalidSocket;
+        xc::HelloResponse hello;
+        std::string error;
+        if (!openAgentSession(state_.endpoint, socket, hello, error)) {
+            state_.connected = false;
+            state_.helloOk = false;
+            state_.lastError = error;
+            state_.lastAction = "连接失败: " + error;
+            refreshUi();
+            return;
         }
-        std::thread(mcpClientLoop, client).detach();
-    }
-}
 
-void startMcpServerOnce() {
-    static std::once_flag once;
-    std::call_once(once, [] {
-        std::thread(mcpServerLoop).detach();
-    });
-}
+        if (!sendLine(socket, xc::driverStatusRequestJson(state_.requestId++))) {
+            closeSocket(socket);
+            state_.lastError = "发送 driver.status 失败";
+            state_.lastAction = "驱动检测请求失败";
+            refreshUi();
+            return;
+        }
+
+        const std::string statusLine = receiveLine(socket, error);
+        closeSocket(socket);
+        if (statusLine.empty()) {
+            state_.lastError = error;
+            state_.lastAction = "驱动检测失败: " + error;
+            refreshUi();
+            return;
+        }
+
+        state_.hello = hello;
+        state_.helloOk = true;
+        state_.connected = true;
+        state_.driver = xc::parseDriverStatusResponse(statusLine);
+        state_.lastError.clear();
+        state_.lastAction = state_.driver.ok ? "已连接 Agent，驱动状态已刷新" : "已连接 Agent，但驱动状态返回错误";
+        refreshUi();
+    }
+
+    void disconnectAgent() {
+        state_.connected = false;
+        state_.helloOk = false;
+        state_.driver = {};
+        state_.lastBreakpointInfo.clear();
+        for (auto& breakpoint : state_.breakpoints) {
+            breakpoint = {};
+        }
+        state_.lastError = "已断开";
+        state_.lastAction = "已断开连接";
+        refreshUi();
+    }
+
+    void setBreakpoint() {
+        if (!applyInputs(true)) {
+            refreshUi();
+            return;
+        }
+        const auto slot = static_cast<std::size_t>(slotSpin_->value());
+        state_.lastAction = "正在写入硬件断点 slot" + std::to_string(slot);
+        refreshUi();
+
+        SocketHandle socket = kInvalidSocket;
+        xc::HelloResponse hello;
+        std::string error;
+        if (!openAgentSession(state_.endpoint, socket, hello, error)) {
+            state_.lastError = error;
+            state_.lastAction = "下断失败: " + error;
+            refreshUi();
+            return;
+        }
+
+        const std::string request = xc::breakpointSetRequestJson(state_.requestId++, static_cast<std::uint32_t>(slot), state_.breakpointAddress, state_.breakpointType, state_.breakpointSize, state_.target);
+        if (!sendLine(socket, request)) {
+            closeSocket(socket);
+            state_.lastError = "发送 breakpoint.set 失败";
+            state_.lastAction = "下断请求发送失败";
+            refreshUi();
+            return;
+        }
+        const std::string responseLine = receiveLine(socket, error);
+        closeSocket(socket);
+        if (responseLine.empty()) {
+            state_.lastError = error;
+            state_.lastAction = "下断失败: " + error;
+            refreshUi();
+            return;
+        }
+
+        const auto response = xc::parseBreakpointSetResponse(responseLine);
+        state_.breakpoints[slot] = response;
+        state_.hello = hello;
+        state_.helloOk = true;
+        state_.connected = true;
+        state_.lastError = response.ok ? "" : response.error;
+        state_.lastAction = response.ok ? response.message : "下断失败: " + response.error;
+        refreshUi();
+    }
+
+    void removeBreakpoint() {
+        applyInputs(false);
+        const auto slot = static_cast<std::size_t>(slotSpin_->value());
+        state_.lastAction = "正在删除硬件断点 slot" + std::to_string(slot);
+        refreshUi();
+
+        SocketHandle socket = kInvalidSocket;
+        xc::HelloResponse hello;
+        std::string error;
+        if (!openAgentSession(state_.endpoint, socket, hello, error)) {
+            state_.lastError = error;
+            state_.lastAction = "删断失败: " + error;
+            refreshUi();
+            return;
+        }
+        if (!sendLine(socket, xc::breakpointRemoveRequestJson(state_.requestId++, static_cast<std::uint32_t>(slot), state_.target))) {
+            closeSocket(socket);
+            state_.lastError = "发送 breakpoint.remove 失败";
+            state_.lastAction = "删断请求发送失败";
+            refreshUi();
+            return;
+        }
+        const std::string responseLine = receiveLine(socket, error);
+        closeSocket(socket);
+        if (responseLine.empty()) {
+            state_.lastError = error;
+            state_.lastAction = "删断失败: " + error;
+            refreshUi();
+            return;
+        }
+        const auto response = xc::parseBreakpointRemoveResponse(responseLine);
+        if (response.ok) {
+            state_.breakpoints[slot] = {};
+        }
+        state_.hello = hello;
+        state_.helloOk = true;
+        state_.connected = true;
+        state_.lastError = response.ok ? "" : response.error;
+        state_.lastAction = response.ok ? response.message : "删断失败: " + response.error;
+        refreshUi();
+    }
+
+    void queryBreakpointInfo() {
+        applyInputs(false);
+        state_.lastAction = "正在查询硬件断点信息";
+        refreshUi();
+
+        SocketHandle socket = kInvalidSocket;
+        xc::HelloResponse hello;
+        std::string error;
+        if (!openAgentSession(state_.endpoint, socket, hello, error)) {
+            state_.lastError = error;
+            state_.lastAction = "查询断点失败: " + error;
+            state_.lastBreakpointInfo = jsonError(error);
+            refreshUi();
+            return;
+        }
+        if (!sendLine(socket, xc::breakpointInfoRequestJson(state_.requestId++))) {
+            closeSocket(socket);
+            state_.lastError = "发送 breakpoint.info 失败";
+            state_.lastAction = "查询断点请求发送失败";
+            state_.lastBreakpointInfo = jsonError(state_.lastError);
+            refreshUi();
+            return;
+        }
+        const std::string responseLine = receiveLine(socket, error);
+        closeSocket(socket);
+        if (responseLine.empty()) {
+            state_.lastError = error;
+            state_.lastAction = "查询断点失败: " + error;
+            state_.lastBreakpointInfo = jsonError(error);
+            refreshUi();
+            return;
+        }
+        state_.hello = hello;
+        state_.helloOk = true;
+        state_.connected = true;
+        state_.lastError.clear();
+        state_.lastAction = "硬件断点信息已刷新";
+        state_.lastBreakpointInfo = responseLine;
+        refreshUi();
+    }
+
+    void refreshUi() {
+        connectionLabel_->setText(state_.connected ? "Agent 在线" : "Agent 未连接");
+        connectionLabel_->setProperty("state", state_.connected ? "ok" : "bad");
+        driverLabel_->setText("驱动: " + QString(state_.driver.moduleLoaded ? "已加载" : "未加载")
+            + "  /proc/modules: " + QString(state_.driver.procModulesReadable ? "可读" : "未确认")
+            + "  协议: " + qstr(std::string(xc::kProtocolName)) + " v" + QString::number(xc::kProtocolVersion));
+        errorLabel_->setText(state_.lastError.empty() ? "错误: 无" : "错误: " + qstr(state_.lastError));
+        errorLabel_->setProperty("state", state_.lastError.empty() ? "ok" : "bad");
+        connectionLabel_->style()->unpolish(connectionLabel_);
+        connectionLabel_->style()->polish(connectionLabel_);
+        errorLabel_->style()->unpolish(errorLabel_);
+        errorLabel_->style()->polish(errorLabel_);
+
+        refreshWatchTable();
+        refreshSlotsTable();
+        registersTable_->setRowCount(0);
+        emptyDataLabel_->setText(state_.connected
+            ? "等待真实断点命中数据，当前没有寄存器快照"
+            : "等待真实断点命中数据，请先连接 Agent");
+        infoText_->setPlainText(state_.lastBreakpointInfo.empty()
+            ? "等待真实断点命中数据\n\n连接 Agent 并发生硬件断点命中后，这里只显示 Agent 返回的真实数据。"
+            : qstr(state_.lastBreakpointInfo));
+        stackText_->setPlainText("等待真实断点命中数据\n暂无真实命中。后续收到 PC/LR/SP 调用链后在这里显示。");
+        statusBar()->showMessage(qstr(state_.lastAction));
+    }
+
+    void refreshWatchTable() {
+        watchTable_->setRowCount(state_.connected ? 1 : 0);
+        if (!state_.connected) {
+            return;
+        }
+        watchTable_->setItem(0, 0, cell("-"));
+        watchTable_->setItem(0, 1, cell("-"));
+        watchTable_->setItem(0, 2, cell("等待真实断点命中数据"));
+    }
+
+    void refreshSlotsTable() {
+        slotsTable_->setRowCount(4);
+        for (int row = 0; row < 4; ++row) {
+            const auto& bp = state_.breakpoints[row];
+            slotsTable_->setItem(row, 0, cell(QString::number(row)));
+            slotsTable_->setItem(row, 1, cell(bp.ok ? qstr(bp.type) : "-"));
+            slotsTable_->setItem(row, 2, cell(bp.ok && bp.address != 0 ? qstr(xc::hexAddress(bp.address)) : "-"));
+            slotsTable_->setItem(row, 3, cell(bp.ok && bp.enabled ? "等待确认" : "空"));
+        }
+        slotsTable_->resizeColumnsToContents();
+    }
+
+    void applyStyle() {
+        setStyleSheet(R"(
+            QWidget { background: #17191d; color: #d8dde5; font-family: "Microsoft YaHei UI"; font-size: 13px; }
+            QFrame#toolbar, QFrame#sessionbar, QStatusBar { background: #20242a; border: 1px solid #313741; }
+            QGroupBox { border: 1px solid #333a44; border-radius: 4px; margin-top: 20px; padding: 8px; background: #1b1f24; font-weight: 600; }
+            QGroupBox::title { subcontrol-origin: margin; left: 10px; padding: 0 4px; color: #eef3f8; }
+            QLineEdit, QComboBox, QSpinBox, QPlainTextEdit, QTableWidget { background: #111317; border: 1px solid #343b45; border-radius: 3px; color: #e4e8ee; selection-background-color: #2567a8; }
+            QLineEdit, QComboBox, QSpinBox { min-height: 25px; padding: 2px 6px; }
+            QPushButton { background: #2b333d; border: 1px solid #44505e; border-radius: 3px; color: #f0f4f8; min-height: 27px; padding: 3px 10px; }
+            QPushButton:hover { background: #36414d; }
+            QPushButton:pressed { background: #1f6aa8; }
+            QHeaderView::section { background: #252b33; border: none; border-right: 1px solid #39414d; color: #cbd3dd; padding: 5px 7px; font-weight: 600; }
+            QTableWidget { alternate-background-color: #15181d; gridline-color: #2b323b; }
+            QPlainTextEdit { font-family: "Cascadia Mono", "Consolas"; font-size: 13px; }
+            QLabel#emptyDataLabel { background: #111317; border: 1px dashed #3b4653; border-radius: 3px; color: #8fbde8; font-size: 15px; font-weight: 600; }
+            QLabel[state="ok"] { color: #68d391; }
+            QLabel[state="bad"] { color: #ff8585; }
+            QSplitter::handle { background: #252b33; }
+        )");
+    }
+};
 
 } // namespace
 
-const DslAppConfig& dslAppConfig() {
-    static const DslAppConfig config = DslAppConfig{}
-        .title("XC 硬件断点调试器")
-        .pageId("xc_hwbp_debugger")
-        .windowSize(1360, 760);
-    return config;
+int main(int argc, char** argv) {
+    QGuiApplication::setHighDpiScaleFactorRoundingPolicy(Qt::HighDpiScaleFactorRoundingPolicy::PassThrough);
+    QApplication app(argc, argv);
+    QApplication::setFont(QFont("Microsoft YaHei UI", 10));
+
+    DebuggerWindow window;
+    window.show();
+    return app.exec();
 }
-
-void compose(eui::Ui& ui, const eui::Screen& screen) {
-    startMcpServerOnce();
-    const float width = clampWidth(screen.width);
-    const float height = clampHeight(screen.height);
-    const float leftWidth = 240.0f;
-    const float margin = 8.0f;
-    const float mainX = margin + leftWidth + 6.0f;
-    const float mainW = width - mainX - margin;
-    const float mainH = height - 142.0f;
-
-    fillRect(ui, "window.bg", 0.0f, 0.0f, width, height, kWindow);
-    fillRect(ui, "titlebar", 0.0f, 0.0f, width, 28.0f, kTitlebar);
-    text(ui, "titlebar.name", 12.0f, 5.0f, "XC 硬件断点调试器", {0.05f, 0.05f, 0.06f, 1.0f}, 14.0f);
-    text(ui, "titlebar.window", width - 78.0f, 5.0f, "—  □  ×", {0.05f, 0.05f, 0.06f, 1.0f}, 14.0f);
-
-    rect(ui, "topbar", 0.0f, 28.0f, width, 34.0f, kTopbar, kLine);
-    rect(ui, "endpoint.input", 18.0f, 35.0f, 180.0f, 20.0f, kInput, kLine);
-    ClientState& client = state();
-    text(ui, "endpoint.input.text", 28.0f, 38.0f, client.endpoint, kText, 13.0f);
-    button(ui, "connect", 220.0f, 34.0f, 62.0f, "连接", [] { connectAndProbeAgent(); });
-    button(ui, "disconnect", 288.0f, 34.0f, 62.0f, "断开", [] { disconnectAgent(); });
-    button(ui, "probe", 356.0f, 34.0f, 86.0f, "检测驱动", [] { connectAndProbeAgent(); });
-    button(ui, "bp.set0", 448.0f, 34.0f, 76.0f, "下断S0", [] { setBreakpointSlot(0); });
-    button(ui, "bp.remove0", 530.0f, 34.0f, 76.0f, "删断S0", [] { removeBreakpointSlot(0); });
-    text(ui, "server.status", 626.0f, 38.0f, std::string("服务器状态: ") + (client.connected ? "已连接" : "未连接") + "  端口: " + std::to_string(xc::kDefaultAgentPort), client.connected ? kCyan : kRed, 13.0f);
-    text(ui, "data.count", width - 110.0f, 38.0f, "数据: 0条", kMuted, 13.0f);
-
-    rect(ui, "sessionbar", 0.0f, 62.0f, width, 32.0f, kToolbar, kLine);
-    text(ui, "session.info", 18.0f, 70.0f, client.connected ? "会话: 已连接手机 Agent，未附加目标进程" : "会话: 未附加目标进程", client.connected ? kText : kMuted, 13.0f);
-    const std::string driverLine = "驱动: " + std::string(client.driver.moduleLoaded ? "已加载" : "未加载")
-        + "  /proc/modules: " + std::string(client.driver.procModulesReadable ? "可读" : "未确认")
-        + "  Agent: " + std::string(client.connected ? "在线" : "离线");
-    text(ui, "driver.info", 230.0f, 70.0f, driverLine, client.connected && client.driver.moduleLoaded ? kCyan : kYellow, 13.0f);
-    text(ui, "protocol.info", 570.0f, 70.0f, "协议: " + std::string(xc::kProtocolName) + " v" + std::to_string(xc::kProtocolVersion), kCyan, 13.0f);
-
-    panel(ui, "watch", margin, 102.0f, leftWidth, 140.0f, "监视断点");
-    fillRect(ui, "watch.selected", margin + 2.0f, 130.0f, leftWidth - 4.0f, 20.0f, kSelect);
-    mono(ui, "watch.empty", 16.0f, 133.0f, "暂无命中断点", kText, 13.0f);
-    mono(ui, "watch.hint1", 16.0f, 164.0f, "连接 agent 后显示", kMuted, 13.0f);
-    mono(ui, "watch.hint2", 16.0f, 186.0f, "断点命中分组", kMuted, 13.0f);
-    mono(ui, "watch.hint3", 16.0f, 208.0f, "#0 / TID / 栈签名", kMuted, 13.0f);
-
-    panel(ui, "slots", margin, 250.0f, leftWidth, 220.0f, "硬件断点槽");
-    mono(ui, "slots.header", 16.0f, 284.0f, "#  类型  地址        状态", kMuted, 12.0f);
-    fillRect(ui, "slots.sel", margin + 2.0f, 296.0f, leftWidth - 4.0f, 20.0f, kSelect);
-    mono(ui, "slots.0", 16.0f, 299.0f, breakpointSlotLine(0, client.breakpoints[0]), client.breakpoints[0].ok ? kCyan : kText, 13.0f);
-    mono(ui, "slots.1", 16.0f, 323.0f, breakpointSlotLine(1, client.breakpoints[1]), client.breakpoints[1].ok ? kCyan : kMuted, 13.0f);
-    mono(ui, "slots.2", 16.0f, 347.0f, breakpointSlotLine(2, client.breakpoints[2]), client.breakpoints[2].ok ? kCyan : kMuted, 13.0f);
-    mono(ui, "slots.3", 16.0f, 371.0f, breakpointSlotLine(3, client.breakpoints[3]), client.breakpoints[3].ok ? kCyan : kMuted, 13.0f);
-    mono(ui, "slots.note", 16.0f, 414.0f, "下断地址: " + xc::hexAddress(client.breakpointAddress), kYellow, 12.0f);
-    mono(ui, "slots.note2", 16.0f, 436.0f, "目标: " + client.target, kYellow, 12.0f);
-
-    panel(ui, "driver", margin, 478.0f, leftWidth, 150.0f, "驱动状态");
-    text(ui, "driver.loaded", 16.0f, 514.0f, std::string("lsdriver: ") + (client.driver.moduleLoaded ? "已加载" : "未加载"), client.driver.moduleLoaded ? kCyan : kYellow, 13.0f);
-    text(ui, "driver.modules", 16.0f, 540.0f, std::string("模块表: ") + (client.driver.procModulesReadable ? "可读取" : "未确认"), client.driver.procModulesReadable ? kText : kMuted, 13.0f);
-    text(ui, "driver.agent", 16.0f, 566.0f, std::string("Agent: ") + (client.connected ? "在线" : "未连接"), client.connected ? kCyan : kRed, 13.0f);
-    mono(ui, "driver.rule", 16.0f, 598.0f, "策略: 共享内存握手判断在线", kYellow, 12.0f);
-
-    panel(ui, "main", mainX, 102.0f, mainW, mainH, "数据视图");
-    mono(ui, "main.thread", mainX + 14.0f, 132.0f, client.connected ? "Tid : - | Pid : - | Agent 已连接，等待真实断点命中数据" : "Tid : - | Pid : - | 当前没有连接到手机 agent", kText, 14.0f);
-    mono(ui, "main.note", mainX + 14.0f, 154.0f, client.connected ? ("Agent: " + client.hello.name + " | 内核: " + client.driver.kernelRelease + " | " + client.driver.message) : "这里显示断点命中后的寄存器、DEC/HEX、模块偏移、堆栈。当前是静态预览数据。", client.connected ? kCyan : kMuted, 13.0f);
-
-    const auto lines = registerLines();
-    float y = 182.0f;
-    int idx = 0;
-    for (const std::string& line : lines) {
-        const Color color = line.rfind("PC", 0) == 0 || line.rfind("SP", 0) == 0 ? kCyan : (idx % 2 == 0 ? kText : Color{0.74f, 0.77f, 0.82f, 1.0f});
-        mono(ui, "reg." + std::to_string(idx), mainX + 14.0f, y, line, color, 13.0f);
-        y += 19.0f;
-        ++idx;
-        if (y > height - 116.0f) { break; }
-    }
-
-    rect(ui, "stack.panel", mainX, height - 104.0f, mainW, 66.0f, kPanel, kLine);
-    text(ui, "stack.title", mainX + 10.0f, height - 96.0f, "堆栈", kText, 14.0f);
-    mono(ui, "stack.0", mainX + 14.0f, height - 72.0f, "#0: 暂无真实命中；连接 agent 后显示 PC/LR 调用链", kMuted, 13.0f);
-    mono(ui, "stack.1", mainX + 14.0f, height - 50.0f, "#1: 后续按 断点ID / TID / 调用栈签名 自动归类", kMuted, 13.0f);
-
-    rect(ui, "statusbar", 0.0f, height - 30.0f, width, 30.0f, kToolbar, kLine);
-    mono(ui, "status.left", 12.0f, height - 21.0f, client.lastAction, client.connected ? kCyan : kYellow, 13.0f);
-    text(ui, "status.right", width - 330.0f, height - 21.0f, "Windows GUI | Android agent | MCP 127.0.0.1:23947", kMuted, 13.0f);
-}
-
-} // namespace app
