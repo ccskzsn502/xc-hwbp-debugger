@@ -26,6 +26,7 @@ constexpr std::uintptr_t kLsdriverSharedAddress = 0x2025827000ULL;
 constexpr std::size_t kLsdriverCommitTimeoutMs = 3000;
 constexpr std::size_t kLsdriverConnectTimeoutMs = 6000;
 constexpr std::uint32_t kMaxBreakpointSlots = 4;
+constexpr int kMaxRecordsPerResponse = 8;
 constexpr std::size_t kProcNameLen = 256;
 
 struct DriverProbe {
@@ -480,39 +481,39 @@ public:
         return response;
     }
 
-    hwbp_info info(std::string& error) {
+    const hwbp_info* refreshInfo(std::string& error) {
         error.clear();
         if (!ensureMapped()) {
             error = lastError_;
-            return {};
+            return nullptr;
         }
         if (!waitForDriver(kLsdriverConnectTimeoutMs)) {
             error = "lsdriver did not attach shared memory at 0x2025827000";
-            return {};
+            return nullptr;
         }
         if (!commit(op_brps_weps_info)) {
             error = lastError_;
-            return {};
+            return nullptr;
         }
         if (req_->status != 0) {
             error = "lsdriver op_brps_weps_info failed: " + std::to_string(req_->status);
-            return {};
+            return nullptr;
         }
         bpInfo_ = req_->bp_info;
-        return bpInfo_;
+        return &bpInfo_;
     }
 
-    hwbp_point records(std::uint32_t slot, std::string& error) {
+    const hwbp_point* refreshRecords(std::uint32_t slot, std::string& error) {
         error.clear();
         if (slot >= 16) {
             error = "slot out of range";
-            return {};
+            return nullptr;
         }
-        const hwbp_info current = info(error);
-        if (!error.empty()) {
-            return {};
+        const hwbp_info* current = refreshInfo(error);
+        if (!current) {
+            return nullptr;
         }
-        return current.points[slot];
+        return &current->points[slot];
     }
 
 private:
@@ -713,6 +714,8 @@ std::string recordsGetJson(std::uint64_t id, std::uint32_t slot, const hwbp_poin
     if (count > 0x100) {
         count = 0x100;
     }
+    const int start = count > kMaxRecordsPerResponse ? count - kMaxRecordsPerResponse : 0;
+    const int returned = count - start;
 
     std::string out = "{\"id\":" + std::to_string(id)
         + ",\"ok\":true,\"slot\":" + std::to_string(slot)
@@ -720,9 +723,10 @@ std::string recordsGetJson(std::uint64_t id, std::uint32_t slot, const hwbp_poin
         + "\",\"type\":" + std::to_string(static_cast<int>(point.bt))
         + ",\"size\":" + std::to_string(static_cast<int>(point.bl))
         + ",\"record_count\":" + std::to_string(count)
+        + ",\"returned\":" + std::to_string(returned)
         + ",\"records\":[";
-    for (int i = 0; i < count; ++i) {
-        if (i != 0) {
+    for (int i = start; i < count; ++i) {
+        if (i != start) {
             out += ",";
         }
         out += recordJson(point.records[i]);
@@ -799,18 +803,18 @@ void handleClient(int clientFd, LsdriverBackend& breakpoints) {
             sendLine(clientFd, driverStatusJson(requestId == 0 ? 1 : requestId, breakpoints.probe()));
         } else if (request.find("breakpoint.info") != std::string::npos) {
             std::string error;
-            const hwbp_info info = breakpoints.info(error);
-            if (error.empty()) {
-                sendLine(clientFd, breakpointInfoJson(requestId == 0 ? 1 : requestId, info));
+            const hwbp_info* info = breakpoints.refreshInfo(error);
+            if (info) {
+                sendLine(clientFd, breakpointInfoJson(requestId == 0 ? 1 : requestId, *info));
             } else {
                 sendLine(clientFd, "{\"id\":" + std::to_string(requestId == 0 ? 1 : requestId) + ",\"ok\":false,\"error\":\"" + escapeJson(error) + "\"}");
             }
         } else if (request.find("records.get") != std::string::npos) {
             const std::uint32_t slot = xc::jsonUint32Value(request, "slot");
             std::string error;
-            const hwbp_point point = breakpoints.records(slot, error);
-            if (error.empty()) {
-                sendLine(clientFd, recordsGetJson(requestId == 0 ? 1 : requestId, slot, point));
+            const hwbp_point* point = breakpoints.refreshRecords(slot, error);
+            if (point) {
+                sendLine(clientFd, recordsGetJson(requestId == 0 ? 1 : requestId, slot, *point));
             } else {
                 sendLine(clientFd, "{\"id\":" + std::to_string(requestId == 0 ? 1 : requestId) + ",\"ok\":false,\"error\":\"" + escapeJson(error) + "\"}");
             }
