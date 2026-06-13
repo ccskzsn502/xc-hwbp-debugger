@@ -46,6 +46,19 @@ int main() {
     require(setParsed.type == "execute", "breakpoint.set type should parse");
     require(setParsed.size == 4, "breakpoint.set size should parse");
 
+    const std::string moduleSetRequest = xc::breakpointSetModuleRequestJson(9, 2, "libtersafe.so", 0x488F08ULL, "access", 8, "com.tencent.tmgp.sgame");
+    require(moduleSetRequest == R"({"id":9,"cmd":"breakpoint.set","slot":2,"module":"libtersafe.so","offset":"0x488f08","type":"access","size":8,"target":"com.tencent.tmgp.sgame"})",
+            "breakpoint.set request should serialize module+offset target syntax");
+    const auto moduleSetParsed = xc::parseBreakpointSetRequest(moduleSetRequest);
+    require(moduleSetParsed.id == 9, "module breakpoint id should parse");
+    require(moduleSetParsed.slot == 2, "module breakpoint slot should parse");
+    require(moduleSetParsed.address == 0, "module breakpoint absolute address should stay zero before agent resolves it");
+    require(moduleSetParsed.module == "libtersafe.so", "module breakpoint module should parse");
+    require(moduleSetParsed.offset == 0x488F08ULL, "module breakpoint offset should parse");
+    require(moduleSetParsed.type == "access", "module breakpoint type should parse");
+    require(moduleSetParsed.size == 8, "module breakpoint size should parse");
+    require(moduleSetParsed.target == "com.tencent.tmgp.sgame", "module breakpoint target should parse");
+
     const std::string setResponseJson = R"({"id":7,"ok":true,"breakpoint":{"slot":0,"address":"0x78919cff84","type":"execute","size":4,"enabled":true,"message":"breakpoint written slot0"}})";
     const auto setResponse = xc::parseBreakpointSetResponse(setResponseJson);
     require(setResponse.ok, "breakpoint.set response ok should parse");
