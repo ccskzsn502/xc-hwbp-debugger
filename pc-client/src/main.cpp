@@ -377,7 +377,7 @@ void setupTable(QTableWidget* table, const QStringList& headers) {
     table->setShowGrid(false);
     table->setWordWrap(false);
     table->setFocusPolicy(Qt::NoFocus);
-    table->verticalHeader()->setDefaultSectionSize(34);
+    table->verticalHeader()->setDefaultSectionSize(30);
     table->horizontalHeader()->setHighlightSections(false);
 }
 
@@ -1022,7 +1022,7 @@ private:
 
     void applyStyle() {
         setStyleSheet(R"(
-            QWidget { background: #101318; color: #dce3ec; font-family: "Microsoft YaHei UI"; font-size: 13px; }
+            QWidget { background: #101318; color: #dce3ec; font-family: "Microsoft YaHei UI"; font-size: 12px; }
             QFrame#connectionBar, QFrame#breakpointEditor, QFrame#sessionbar, QStatusBar { background: #171c23; border: 1px solid #2c3541; border-radius: 6px; }
             QFrame#breakpointEditor { background: #141922; }
             QStatusBar { color: #aeb8c5; }
@@ -1049,8 +1049,8 @@ private:
             QTableWidget { alternate-background-color: #11171e; gridline-color: #24303c; }
             QTableWidget::item { padding: 4px 6px; }
             QTableWidget::item:selected { background: #1f5f87; color: #ffffff; }
-            QPlainTextEdit { font-family: "Cascadia Mono", "Consolas"; font-size: 13px; line-height: 1.35; padding: 8px; }
-            QLabel#emptyDataLabel { background: #0b0f14; border: 1px dashed #3d4a5a; border-radius: 6px; color: #9ed2ff; font-size: 14px; font-weight: 600; }
+            QPlainTextEdit { font-family: "Cascadia Mono", "Consolas"; font-size: 12px; line-height: 1.32; padding: 7px; }
+            QLabel#emptyDataLabel { background: #0b0f14; border: 1px dashed #3d4a5a; border-radius: 6px; color: #9ed2ff; font-size: 13px; font-weight: 600; }
             QSplitter::handle { background: #202832; }
             QSplitter::handle:horizontal { width: 5px; }
             QSplitter::handle:vertical { height: 5px; }
@@ -1063,7 +1063,7 @@ private:
 int main(int argc, char** argv) {
     QGuiApplication::setHighDpiScaleFactorRoundingPolicy(Qt::HighDpiScaleFactorRoundingPolicy::PassThrough);
     QApplication app(argc, argv);
-    QApplication::setFont(QFont("Microsoft YaHei UI", 10));
+    QApplication::setFont(QFont("Microsoft YaHei UI", 9));
 
     DebuggerWindow window;
     window.show();

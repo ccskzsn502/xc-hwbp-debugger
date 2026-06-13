@@ -97,6 +97,8 @@ int main(int argc, char** argv) {
             "debugger actions should have primary, secondary and destructive visual hierarchy");
     require(contains(mainCpp, "QFrame#connectionBar") && contains(mainCpp, "QFrame#breakpointEditor") && contains(mainCpp, "border-radius: 6px"),
             "Qt stylesheet should define distinct professional dark debugger panels");
+    require(contains(mainCpp, "font-size: 12px") && contains(mainCpp, "setDefaultSectionSize(30)"),
+            "debugger UI should use compact fonts and table rows for dense hit inspection");
     require(contains(mainCpp, "breakpointsTable_") && !contains(mainCpp, "watchTable_") && !contains(mainCpp, "slotsTable_"),
             "watch breakpoints and breakpoint slots should be one linked breakpoint list, not two unrelated panes");
     require(contains(mainCpp, "hitRecordsTable_") && contains(mainCpp, "refreshHitRecordsTable") && contains(mainCpp, "selectedHitIndex_"),
