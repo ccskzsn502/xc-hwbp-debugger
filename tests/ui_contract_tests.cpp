@@ -29,6 +29,39 @@ bool contains(const std::string& haystack, const std::string& needle) {
     return haystack.find(needle) != std::string::npos;
 }
 
+std::size_t countOccurrences(const std::string& haystack, const std::string& needle) {
+    std::size_t count = 0;
+    std::size_t pos = 0;
+    while ((pos = haystack.find(needle, pos)) != std::string::npos) {
+        ++count;
+        pos += needle.size();
+    }
+    return count;
+}
+
+std::string methodBody(const std::string& source, const std::string& signature) {
+    const std::size_t signaturePos = source.find(signature);
+    const std::string missing = "missing method " + signature;
+    require(signaturePos != std::string::npos, missing.c_str());
+    const std::size_t openBrace = source.find('{', signaturePos);
+    const std::string missingBody = "missing method body for " + signature;
+    require(openBrace != std::string::npos, missingBody.c_str());
+    int depth = 0;
+    for (std::size_t i = openBrace; i < source.size(); ++i) {
+        if (source[i] == '{') {
+            ++depth;
+        } else if (source[i] == '}') {
+            --depth;
+            if (depth == 0) {
+                return source.substr(openBrace, i - openBrace + 1);
+            }
+        }
+    }
+    const std::string unterminated = "unterminated method body for " + signature;
+    require(false, unterminated.c_str());
+    return {};
+}
+
 } // namespace
 
 int main(int argc, char** argv) {
@@ -60,6 +93,16 @@ int main(int argc, char** argv) {
             "breakpoint input should support module.so+offset syntax");
     require(contains(mainCpp, "typeCombo_->addItems({\"x\", \"r\", \"w\", \"rw\"})") && contains(mainCpp, "protocolTypeForUi"),
             "breakpoint type selector should use compact x/r/w/rw labels and map them to the wire protocol");
+    require(contains(mainCpp, "SocketHandle agentSocket_") && contains(mainCpp, "closeAgentSession"),
+            "GUI connection button should own a persistent Agent socket that disconnect closes explicitly");
+    require(contains(mainCpp, "sendAgentRequest") && contains(mainCpp, "ensureAgentSession"),
+            "GUI commands should reuse one Agent session through a shared request helper");
+    require(!contains(methodBody(mainCpp, "void setBreakpoint()"), "openAgentSession")
+                && !contains(methodBody(mainCpp, "void removeBreakpoint()"), "openAgentSession")
+                && !contains(methodBody(mainCpp, "void queryBreakpointInfo()"), "openAgentSession"),
+            "breakpoint commands must not reconnect for every request");
+    require(countOccurrences(methodBody(mainCpp, "void markConnected()"), "closeSocket") == 0,
+            "successful connection probing must keep the Agent socket open after driver.status");
     require(contains(mainCpp, "监视断点") && contains(mainCpp, "硬件断点槽") && contains(mainCpp, "驱动状态"),
             "Qt GUI labels must stay Chinese");
 
