@@ -99,8 +99,16 @@ int main(int argc, char** argv) {
             "Qt stylesheet should define distinct professional dark debugger panels");
     require(contains(mainCpp, "breakpointsTable_") && !contains(mainCpp, "watchTable_") && !contains(mainCpp, "slotsTable_"),
             "watch breakpoints and breakpoint slots should be one linked breakpoint list, not two unrelated panes");
-    require(contains(mainCpp, "命中详情") && contains(mainCpp, "registersText_") && contains(mainCpp, "stackText_"),
-            "registers and stack should live together in one hit detail area instead of many grid panels");
+    require(contains(mainCpp, "hitRecordsTable_") && contains(mainCpp, "refreshHitRecordsTable") && contains(mainCpp, "selectedHitIndex_"),
+            "PC GUI should show a selectable hit list under the breakpoint list instead of only the latest hit");
+    require(contains(mainCpp, "itemSelectionChanged") && contains(mainCpp, "currentHitRecord"),
+            "selecting a hit row should switch the rendered register snapshot");
+    require(contains(mainCpp, "formatHitSnapshot") && contains(mainCpp, "X29") && !contains(mainCpp, "formatLatestHitStack"),
+            "registers and PC/LR/SP should render as one hit snapshot with one register per line, not split panes");
+    require(contains(mainCpp, "resolveAddressLabel") && contains(mainCpp, "AddressResolverContext"),
+            "address rendering should go through a resolver context that can later consume agent maps");
+    require(contains(mainCpp, "命中详情") && contains(mainCpp, "hitSnapshotText_") && !contains(mainCpp, "stackText_"),
+            "registers and stack should render in one combined hit snapshot view");
     require(contains(mainCpp, "parseBreakpointAddress") && contains(mainCpp, "libtersafe.so+0x488F08"),
             "breakpoint input should support module.so+offset syntax");
     require(contains(mainCpp, "typeCombo_->addItems({\"x\", \"r\", \"w\", \"rw\"})") && contains(mainCpp, "protocolTypeForUi"),
@@ -111,8 +119,8 @@ int main(int argc, char** argv) {
             "GUI commands should reuse one Agent session through a shared request helper");
     require(contains(mainCpp, "records.get") && contains(mainCpp, "parseRecordsGetResponse"),
             "PC GUI must request and parse records.get so breakpoint hits appear instead of only raw breakpoint.info JSON");
-    require(contains(mainCpp, "refreshHitDetails") && contains(mainCpp, "hitCount") && contains(mainCpp, "PC=") && contains(mainCpp, "LR=") && contains(mainCpp, "SP="),
-            "PC GUI must render latest hit registers into the hit detail pane");
+    require(contains(mainCpp, "refreshHitDetails") && contains(mainCpp, "hit #") && contains(mainCpp, "PC") && contains(mainCpp, "LR") && contains(mainCpp, "SP") && contains(mainCpp, "X29"),
+            "PC GUI must render the selected hit snapshot into the hit detail pane");
     require(contains(mainCpp, "#include <QTimer>") && contains(mainCpp, "hitPollTimer_") && contains(mainCpp, "pollHitRecords"),
             "PC GUI must poll records.get because the JSONL protocol has no async hit push from the phone");
     require(contains(mainCpp, "queryHitRecords") && contains(methodBody(mainCpp, "void queryBreakpointInfo()"), "queryHitRecords"),

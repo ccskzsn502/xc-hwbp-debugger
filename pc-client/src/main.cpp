@@ -71,6 +71,7 @@ struct ClientState {
     std::string breakpointLabels[4];
     std::string lastBreakpointInfo;
     xc::RecordsGetResponse hitRecords;
+    std::size_t selectedHitIndex = 0;
     std::string lastError = "未连接";
     std::string lastAction = "就绪: 等待连接手机 Agent";
     std::uint64_t requestId = 1;
@@ -152,40 +153,57 @@ std::string displayAddress(const BreakpointAddressInput& input) {
     return input.address == 0 ? "-" : xc::hexAddress(input.address);
 }
 
+struct AddressResolverContext {
+    std::string module;
+    std::uint64_t moduleBase = 0;
+    bool hasModuleBase = false;
+};
+
+std::string padLabel(std::string label) {
+    while (label.size() < 8) {
+        label.push_back(' ');
+    }
+    return label;
+}
+
+std::string resolveAddressLabel(std::uint64_t address, const AddressResolverContext& context) {
+    if (address == 0) {
+        return "-";
+    }
+    const std::string absolute = xc::hexAddress(address);
+    if (context.hasModuleBase && !context.module.empty() && address >= context.moduleBase) {
+        return absolute + "  " + context.module + "+" + xc::hexAddress(address - context.moduleBase);
+    }
+    return absolute;
+}
+
 std::string registerLine(const std::string& name, std::uint64_t value) {
-    return name + "=" + xc::hexAddress(value);
+    return padLabel(name) + xc::hexAddress(value);
 }
 
-std::string formatLatestHitRegisters(const xc::RecordsGetResponse& records) {
-    if (!records.ok || records.records.empty()) {
-        return "寄存器\n\n等待真实断点命中数据。收到 Agent 返回的 PC/LR/SP/X 寄存器后在这里集中显示。";
-    }
-    const auto& hit = records.records.back();
-    std::ostringstream out;
-    out << "寄存器\n\n";
-    out << "slot=" << records.slot << "  hitCount=" << hit.hitCount << "\n";
-    out << "PC=" << xc::hexAddress(hit.pc)
-        << "  LR=" << xc::hexAddress(hit.lr)
-        << "  SP=" << xc::hexAddress(hit.sp) << "\n";
-    out << registerLine("PSTATE", hit.pstate) << "  " << registerLine("SYSCALL", hit.syscallno)
-        << "  FPSR=" << hit.fpsr << "  FPCR=" << hit.fpcr << "\n\n";
-    for (int i = 0; i < 30; ++i) {
-        out << registerLine("X" + std::to_string(i), hit.x[i]);
-        out << ((i % 3 == 2) ? "\n" : "  ");
-    }
-    return out.str();
+std::string addressLine(const std::string& name, std::uint64_t value, const AddressResolverContext& context) {
+    return padLabel(name) + resolveAddressLabel(value, context);
 }
 
-std::string formatLatestHitStack(const xc::RecordsGetResponse& records) {
-    if (!records.ok || records.records.empty()) {
-        return "调用栈\n\n暂无真实命中。后续收到 PC/LR/SP 调用链后在这里显示。";
+std::string formatHitSnapshot(const xc::RecordsGetResponse& records, const xc::HitRecord* hit, const AddressResolverContext& context) {
+    if (!records.ok || hit == nullptr) {
+        return "命中快照\n\n等待真实断点命中数据。选择左侧命中列表后显示对应 PC/LR/SP 和寄存器。";
     }
-    const auto& hit = records.records.back();
+
     std::ostringstream out;
-    out << "调用栈\n\n";
-    out << "PC " << xc::hexAddress(hit.pc) << "\n";
-    out << "LR " << xc::hexAddress(hit.lr) << "\n";
-    out << "SP " << xc::hexAddress(hit.sp) << "\n";
+    out << "命中快照\n\n";
+    out << "slot " << records.slot << "   hit #" << hit->hitCount << "\n";
+    out << addressLine("PC", hit->pc, context) << "\n";
+    out << addressLine("LR", hit->lr, context) << "\n";
+    out << addressLine("SP", hit->sp, context) << "\n\n";
+    out << registerLine("PSTATE", hit->pstate) << "\n";
+    out << registerLine("SYSCALL", hit->syscallno) << "\n";
+    out << padLabel("FPSR") << hit->fpsr << "\n";
+    out << padLabel("FPCR") << hit->fpcr << "\n\n";
+    for (int i = 0; i < 29; ++i) {
+        out << registerLine("X" + std::to_string(i), hit->x[i]) << "\n";
+    }
+    out << registerLine("X29", hit->x[29]) << "\n";
     return out.str();
 }
 
@@ -392,11 +410,13 @@ private:
     QLabel* driverLabel_ = nullptr;
     QLabel* errorLabel_ = nullptr;
     QTableWidget* breakpointsTable_ = nullptr;
+    QTableWidget* hitRecordsTable_ = nullptr;
     QLabel* emptyDataLabel_ = nullptr;
-    QPlainTextEdit* registersText_ = nullptr;
-    QPlainTextEdit* stackText_ = nullptr;
+    QPlainTextEdit* hitSnapshotText_ = nullptr;
     QPlainTextEdit* infoText_ = nullptr;
     QTimer* hitPollTimer_ = nullptr;
+    std::size_t selectedHitIndex_ = 0;
+    bool manualHitSelection_ = false;
 
     QLabel* fieldLabel(const QString& text) {
         auto* label = new QLabel(text);
@@ -549,9 +569,36 @@ private:
         breakpointsTable_->horizontalHeader()->setSectionResizeMode(2, QHeaderView::Stretch);
         breakpointsTable_->horizontalHeader()->setSectionResizeMode(3, QHeaderView::ResizeToContents);
         breakpointsTable_->horizontalHeader()->setSectionResizeMode(4, QHeaderView::ResizeToContents);
+        connect(breakpointsTable_, &QTableWidget::itemSelectionChanged, this, [this] {
+            const int row = breakpointsTable_->currentRow();
+            if (row >= 0) {
+                slotSpin_->setValue(row);
+                queryHitRecords(static_cast<std::uint32_t>(row));
+            }
+        });
+
+        auto* hitsTitle = new QLabel("命中列表");
+        hitsTitle->setObjectName("paneHint");
+        hitRecordsTable_ = new QTableWidget;
+        setupTable(hitRecordsTable_, {"#", "PC", "LR"});
+        hitRecordsTable_->horizontalHeader()->setStretchLastSection(true);
+        hitRecordsTable_->horizontalHeader()->setSectionResizeMode(0, QHeaderView::ResizeToContents);
+        hitRecordsTable_->horizontalHeader()->setSectionResizeMode(1, QHeaderView::Stretch);
+        hitRecordsTable_->horizontalHeader()->setSectionResizeMode(2, QHeaderView::Stretch);
+        connect(hitRecordsTable_, &QTableWidget::itemSelectionChanged, this, [this] {
+            const int row = hitRecordsTable_->currentRow();
+            if (row >= 0) {
+                selectedHitIndex_ = static_cast<std::size_t>(row);
+                state_.selectedHitIndex = selectedHitIndex_;
+                manualHitSelection_ = true;
+                refreshHitDetails();
+            }
+        });
 
         layout->addWidget(hint);
         layout->addWidget(breakpointsTable_, 1);
+        layout->addWidget(hitsTitle);
+        layout->addWidget(hitRecordsTable_, 1);
         return box;
     }
 
@@ -567,19 +614,15 @@ private:
         emptyDataLabel_->setMinimumHeight(38);
 
         auto* detailSplitter = new QSplitter(Qt::Vertical);
-        registersText_ = new QPlainTextEdit;
-        registersText_->setReadOnly(true);
-        registersText_->setObjectName("registersText");
-        stackText_ = new QPlainTextEdit;
-        stackText_->setReadOnly(true);
-        stackText_->setObjectName("stackText");
+        hitSnapshotText_ = new QPlainTextEdit;
+        hitSnapshotText_->setReadOnly(true);
+        hitSnapshotText_->setObjectName("hitSnapshotText");
         infoText_ = new QPlainTextEdit;
         infoText_->setReadOnly(true);
         infoText_->setObjectName("infoText");
-        detailSplitter->addWidget(registersText_);
-        detailSplitter->addWidget(stackText_);
+        detailSplitter->addWidget(hitSnapshotText_);
         detailSplitter->addWidget(infoText_);
-        detailSplitter->setSizes({290, 210, 170});
+        detailSplitter->setSizes({500, 150});
 
         layout->addWidget(emptyDataLabel_);
         layout->addWidget(detailSplitter, 1);
@@ -704,6 +747,9 @@ private:
         state_.driver = {};
         state_.lastBreakpointInfo.clear();
         state_.hitRecords = {};
+        state_.selectedHitIndex = 0;
+        selectedHitIndex_ = 0;
+        manualHitSelection_ = false;
         for (int i = 0; i < 4; ++i) {
             state_.breakpoints[i] = {};
             state_.breakpointLabels[i].clear();
@@ -769,6 +815,9 @@ private:
             state_.breakpoints[slot] = {};
             state_.breakpointLabels[slot].clear();
             state_.hitRecords = {};
+            state_.selectedHitIndex = 0;
+            selectedHitIndex_ = 0;
+            manualHitSelection_ = false;
         }
         updateHitPolling();
         state_.lastError = response.ok ? "" : response.error;
@@ -809,11 +858,24 @@ private:
             state_.lastError = error;
             state_.lastAction = "查询命中记录失败: " + error;
             state_.hitRecords = {};
+            state_.selectedHitIndex = 0;
+            selectedHitIndex_ = 0;
+            manualHitSelection_ = false;
             refreshUi();
             return;
         }
 
         state_.hitRecords = xc::parseRecordsGetResponse(responseLine);
+        if (!state_.hitRecords.records.empty()) {
+            if (!manualHitSelection_ || selectedHitIndex_ >= state_.hitRecords.records.size()) {
+                selectedHitIndex_ = state_.hitRecords.records.size() - 1;
+            }
+            state_.selectedHitIndex = selectedHitIndex_;
+        } else {
+            selectedHitIndex_ = 0;
+            state_.selectedHitIndex = 0;
+            manualHitSelection_ = false;
+        }
         if (!state_.hitRecords.ok) {
             state_.lastError = state_.hitRecords.error;
             state_.lastAction = "查询命中记录失败: " + state_.hitRecords.error;
@@ -873,6 +935,7 @@ private:
         errorLabel_->style()->polish(errorLabel_);
 
         refreshBreakpointsTable();
+        refreshHitRecordsTable();
         refreshHitDetails();
         infoText_->setPlainText(state_.lastBreakpointInfo.empty()
             ? "断点信息\n\n只显示 Agent 返回的真实断点和命中信息。启动时不填充模拟数据。"
@@ -885,8 +948,61 @@ private:
         emptyDataLabel_->setText(hasHit
             ? "已收到真实断点命中数据"
             : (state_.connected ? "等待真实断点命中数据，当前没有寄存器和调用栈快照" : "等待真实断点命中数据，请先连接 Agent"));
-        registersText_->setPlainText(qstr(formatLatestHitRegisters(state_.hitRecords)));
-        stackText_->setPlainText(qstr(formatLatestHitStack(state_.hitRecords)));
+        hitSnapshotText_->setPlainText(qstr(formatHitSnapshot(state_.hitRecords, currentHitRecord(), resolverContext())));
+    }
+
+    const xc::HitRecord* currentHitRecord() const {
+        if (!state_.hitRecords.ok || state_.hitRecords.records.empty()) {
+            return nullptr;
+        }
+        const std::size_t index = selectedHitIndex_ < state_.hitRecords.records.size() ? selectedHitIndex_ : state_.hitRecords.records.size() - 1;
+        return &state_.hitRecords.records[index];
+    }
+
+    AddressResolverContext resolverContext() const {
+        AddressResolverContext context;
+        if (state_.hitRecords.slot >= 4) {
+            return context;
+        }
+        const auto& label = state_.breakpointLabels[state_.hitRecords.slot];
+        const auto& breakpoint = state_.breakpoints[state_.hitRecords.slot];
+        const std::size_t plus = label.find('+');
+        if (plus == std::string::npos || !breakpoint.ok || breakpoint.address == 0) {
+            return context;
+        }
+        std::uint64_t offset = 0;
+        if (!parseUnsigned64(label.substr(plus + 1), offset) || breakpoint.address < offset) {
+            return context;
+        }
+        context.module = label.substr(0, plus);
+        context.moduleBase = breakpoint.address - offset;
+        context.hasModuleBase = true;
+        return context;
+    }
+
+    void refreshHitRecordsTable() {
+        hitRecordsTable_->setRowCount(0);
+        const bool oldSignalsBlocked = hitRecordsTable_->blockSignals(true);
+        if (!state_.hitRecords.ok || state_.hitRecords.records.empty()) {
+            hitRecordsTable_->blockSignals(oldSignalsBlocked);
+            return;
+        }
+        const AddressResolverContext context = resolverContext();
+        hitRecordsTable_->setRowCount(static_cast<int>(state_.hitRecords.records.size()));
+        for (int row = 0; row < static_cast<int>(state_.hitRecords.records.size()); ++row) {
+            const auto& hit = state_.hitRecords.records[static_cast<std::size_t>(row)];
+            hitRecordsTable_->setItem(row, 0, cell(QString("#%1").arg(hit.hitCount)));
+            hitRecordsTable_->setItem(row, 1, cell(qstr(resolveAddressLabel(hit.pc, context))));
+            hitRecordsTable_->setItem(row, 2, cell(qstr(resolveAddressLabel(hit.lr, context))));
+        }
+        hitRecordsTable_->resizeColumnsToContents();
+        hitRecordsTable_->horizontalHeader()->setSectionResizeMode(1, QHeaderView::Stretch);
+        hitRecordsTable_->horizontalHeader()->setSectionResizeMode(2, QHeaderView::Stretch);
+        const int selectedRow = static_cast<int>(selectedHitIndex_ < state_.hitRecords.records.size() ? selectedHitIndex_ : state_.hitRecords.records.size() - 1);
+        if (hitRecordsTable_->currentRow() != selectedRow) {
+            hitRecordsTable_->selectRow(selectedRow);
+        }
+        hitRecordsTable_->blockSignals(oldSignalsBlocked);
     }
 
     void refreshBreakpointsTable() {
