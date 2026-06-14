@@ -29,7 +29,7 @@ jobs:
           version: '6.7.3'
           cache: true
       - name: Configure
-        run: cmake -S . -B build-win -DXC_BUILD_AGENT=OFF -DXC_BUILD_PC_CLIENT=ON -DXC_BUILD_MCP_SERVER=ON
+        run: cmake -S . -B build-win -DXC_BUILD_AGENT=OFF -DXC_BUILD_PC_CLIENT=ON -DXC_BUILD_MCP_SERVER=OFF
       - name: Build
         run: cmake --build build-win --config Release --parallel
       - name: Stage PC Windows artifact
@@ -44,6 +44,9 @@ jobs:
           windeployqt --release --no-translations $exe
           if (!(Get-ChildItem -LiteralPath $packageDir -Filter "Qt6Widgets.dll" -File -ErrorAction SilentlyContinue)) {
             throw "Missing deployed Qt6Widgets.dll."
+          }
+          if (!(Get-ChildItem -LiteralPath $packageDir -Filter "Qt6Network.dll" -File -ErrorAction SilentlyContinue)) {
+            throw "Missing deployed Qt6Network.dll."
           }
           Get-ChildItem -LiteralPath $packageDir -Recurse | Sort-Object FullName | Format-Table FullName,Length
       - name: Verify PC Windows artifact starts without VC runtime DLLs
@@ -66,27 +69,11 @@ jobs:
           if ($imports -match "MSVCP140|VCRUNTIME140") {
             throw "Windows GUI artifact still depends on VC runtime DLLs. Build must use the static MSVC runtime so the downloaded GUI can open on clean machines."
           }
-      - name: Stage MCP Windows artifact
-        shell: pwsh
-        run: |
-          $packageDir = "build-win/package/xc-hwbp-mcp-windows"
-          New-Item -ItemType Directory -Force -Path $packageDir | Out-Null
-          $exe = "build-win/mcp-server/Release/xc-hwbp-mcp.exe"
-          if (!(Test-Path -LiteralPath $exe)) {
-            throw "Missing MCP server executable."
-          }
-          Copy-Item -LiteralPath $exe -Destination $packageDir
-          Get-ChildItem -LiteralPath $packageDir -Recurse | Sort-Object FullName | Format-Table FullName,Length
       - name: Upload PC Windows artifact
         uses: actions/upload-artifact@v4
         with:
           name: xc-hwbp-debugger-windows-exe
           path: build-win/package/xc-hwbp-debugger-windows/
-      - name: Upload MCP Windows artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: xc-hwbp-mcp-windows-exe
-          path: build-win/package/xc-hwbp-mcp-windows/
 
   android-agent:
     runs-on: ubuntu-latest

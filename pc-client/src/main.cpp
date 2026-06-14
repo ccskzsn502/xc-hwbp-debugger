@@ -18,11 +18,15 @@
 #include <QGuiApplication>
 #include <QHBoxLayout>
 #include <QHeaderView>
+#include <QHostAddress>
 #include <QLabel>
 #include <QLineEdit>
 #include <QMainWindow>
+#include <QNetworkInterface>
 #include <QPlainTextEdit>
 #include <QPushButton>
+#include <QTcpServer>
+#include <QTcpSocket>
 #include <QSpinBox>
 #include <QSplitter>
 #include <QStringList>
@@ -48,6 +52,7 @@
 #endif
 
 #include "xc/protocol.hpp"
+#include "xc/mcp_core.hpp"
 
 namespace {
 
@@ -75,6 +80,7 @@ struct ClientState {
     std::size_t selectedHitIndex = 0;
     std::string lastError = "未连接";
     std::string lastAction = "就绪: 等待连接手机 Agent";
+    std::string mcpStatus = "MCP: 未启动";
     std::uint64_t requestId = 1;
 };
 
@@ -425,10 +431,14 @@ public:
         hitPollTimer_ = new QTimer(this);
         hitPollTimer_->setInterval(1000);
         connect(hitPollTimer_, &QTimer::timeout, this, [this] { pollHitRecords(); });
+        startMcpServer();
         refreshUi();
     }
 
-    ~DebuggerWindow() override { closeAgentSession(); }
+    ~DebuggerWindow() override {
+        stopMcpServer();
+        closeAgentSession();
+    }
 
 private:
     ClientState state_;
@@ -442,6 +452,7 @@ private:
     QSpinBox* slotSpin_ = nullptr;
     QLabel* connectionLabel_ = nullptr;
     QLabel* driverLabel_ = nullptr;
+    QLabel* mcpLabel_ = nullptr;
     QLabel* errorLabel_ = nullptr;
     QTableWidget* breakpointsTable_ = nullptr;
     QTableWidget* hitRecordsTable_ = nullptr;
@@ -449,6 +460,8 @@ private:
     QPlainTextEdit* hitSnapshotText_ = nullptr;
     QPlainTextEdit* infoText_ = nullptr;
     QTimer* hitPollTimer_ = nullptr;
+    QTcpServer* mcpServer_ = nullptr;
+    xc::mcp::McpState* mcpState_ = nullptr;
     std::size_t selectedHitIndex_ = 0;
     bool manualHitSelection_ = false;
 
@@ -554,15 +567,19 @@ private:
         status->setSpacing(16);
         connectionLabel_ = new QLabel;
         driverLabel_ = new QLabel;
+        mcpLabel_ = new QLabel;
         errorLabel_ = new QLabel;
         connectionLabel_->setObjectName("statusText");
         driverLabel_->setObjectName("statusText");
+        mcpLabel_->setObjectName("statusText");
         errorLabel_->setObjectName("statusText");
         connectionLabel_->setMinimumWidth(84);
         driverLabel_->setTextInteractionFlags(Qt::TextSelectableByMouse);
+        mcpLabel_->setTextInteractionFlags(Qt::TextSelectableByMouse);
         errorLabel_->setTextInteractionFlags(Qt::TextSelectableByMouse);
         status->addWidget(connectionLabel_);
         status->addWidget(driverLabel_, 1);
+        status->addWidget(mcpLabel_, 1);
         status->addWidget(errorLabel_, 1);
 
         layout->addLayout(controls);
@@ -755,6 +772,94 @@ private:
         }
         state_.connected = true;
         return responseLine;
+    }
+
+    void startMcpServer() {
+        mcpState_ = xc::mcp::createState();
+        mcpServer_ = new QTcpServer(this);
+        connect(mcpServer_, &QTcpServer::newConnection, this, [this] { acceptMcpConnection(); });
+        const auto port = xc::mcp::defaultHttpPort();
+        if (!mcpServer_->listen(QHostAddress::LocalHost, port)) {
+            state_.mcpStatus = "MCP: 启动失败 " + stdstr(mcpServer_->errorString());
+            return;
+        }
+        state_.mcpStatus = "MCP: http://127.0.0.1:" + std::to_string(port) + "/mcp";
+    }
+
+    void stopMcpServer() {
+        if (mcpServer_) {
+            mcpServer_->close();
+        }
+        if (mcpState_) {
+            xc::mcp::destroyState(mcpState_);
+            mcpState_ = nullptr;
+        }
+    }
+
+    void acceptMcpConnection() {
+        while (mcpServer_ && mcpServer_->hasPendingConnections()) {
+            QTcpSocket* socket = mcpServer_->nextPendingConnection();
+            auto* buffer = new QByteArray;
+            connect(socket, &QTcpSocket::readyRead, this, [this, socket, buffer] {
+                buffer->append(socket->readAll());
+                handleMcpHttpBuffer(socket, *buffer);
+            });
+            connect(socket, &QTcpSocket::disconnected, socket, &QTcpSocket::deleteLater);
+            connect(socket, &QTcpSocket::destroyed, this, [buffer] { delete buffer; });
+        }
+    }
+
+    void handleMcpHttpBuffer(QTcpSocket* socket, const QByteArray& buffer) {
+        const int headerEnd = buffer.indexOf("\r\n\r\n");
+        if (headerEnd < 0) {
+            return;
+        }
+        const QByteArray header = buffer.left(headerEnd);
+        int contentLength = 0;
+        const QList<QByteArray> lines = header.split('\n');
+        for (QByteArray line : lines) {
+            line = line.trimmed();
+            if (line.toLower().startsWith("content-length:")) {
+                contentLength = line.mid(15).trimmed().toInt();
+            }
+        }
+        const int bodyStart = headerEnd + 4;
+        if (buffer.size() - bodyStart < contentLength) {
+            return;
+        }
+        const QByteArray body = buffer.mid(bodyStart, contentLength);
+        sendMcpHttpResponse(socket, body);
+    }
+
+    void sendMcpHttpResponse(QTcpSocket* socket, const QByteArray& body) {
+        if (!mcpState_) {
+            writeHttp(socket, 503, "application/json", "{\"error\":\"MCP state unavailable\"}");
+            return;
+        }
+        xc::mcp::setDefaults(*mcpState_, state_.endpoint, state_.target);
+        const std::string response = xc::mcp::handleRequest(*mcpState_, std::string_view(body.constData(), static_cast<std::size_t>(body.size())));
+        if (response.empty()) {
+            writeHttp(socket, 202, "application/json", "{}");
+            return;
+        }
+        writeHttp(socket, 200, "application/json", response);
+    }
+
+    void writeHttp(QTcpSocket* socket, int statusCode, const char* contentType, const std::string& body) {
+        const char* reason = statusCode == 200 ? "OK" : (statusCode == 202 ? "Accepted" : "Service Unavailable");
+        QByteArray response;
+        response.append("HTTP/1.1 ");
+        response.append(QByteArray::number(statusCode));
+        response.append(' ');
+        response.append(reason);
+        response.append("\r\nContent-Type: ");
+        response.append(contentType);
+        response.append("\r\nAccess-Control-Allow-Origin: *\r\nConnection: close\r\nContent-Length: ");
+        response.append(QByteArray::number(static_cast<qsizetype>(body.size())));
+        response.append("\r\n\r\n");
+        response.append(body.data(), static_cast<qsizetype>(body.size()));
+        socket->write(response);
+        socket->disconnectFromHost();
     }
 
     void markConnected() {
@@ -968,6 +1073,7 @@ private:
         driverLabel_->setText("驱动: " + QString(state_.driver.moduleLoaded ? "已加载" : "未加载")
             + "  /proc/modules: " + QString(state_.driver.procModulesReadable ? "可读" : "未确认")
             + "  协议: " + qstr(std::string(xc::kProtocolName)) + " v" + QString::number(xc::kProtocolVersion));
+        mcpLabel_->setText(qstr(state_.mcpStatus));
         errorLabel_->setText(state_.lastError.empty() ? "错误: 无" : "错误: " + qstr(state_.lastError));
 
         refreshBreakpointsTable();

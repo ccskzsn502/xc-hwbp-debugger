@@ -24,12 +24,12 @@ if(XC_BUILD_AGENT)
     add_subdirectory(agent)
 endif()
 
-if(XC_BUILD_PC_CLIENT)
-    add_subdirectory(pc-client)
+if(XC_BUILD_PC_CLIENT OR XC_BUILD_MCP_SERVER)
+    add_subdirectory(mcp-server)
 endif()
 
-if(XC_BUILD_MCP_SERVER)
-    add_subdirectory(mcp-server)
+if(XC_BUILD_PC_CLIENT)
+    add_subdirectory(pc-client)
 endif()
 
 option(XC_BUILD_TESTS "Build tests" OFF)

@@ -1,10 +1,10 @@
-find_package(Qt6 REQUIRED COMPONENTS Widgets)
+find_package(Qt6 REQUIRED COMPONENTS Network Widgets)
 
 add_executable(xc-hwbp-debugger
     src/main.cpp
 )
 
-target_link_libraries(xc-hwbp-debugger PRIVATE xc_shared Qt6::Widgets)
+target_link_libraries(xc-hwbp-debugger PRIVATE xc_shared xc_mcp_core Qt6::Network Qt6::Widgets)
 
 target_compile_features(xc-hwbp-debugger PRIVATE cxx_std_17)
 
