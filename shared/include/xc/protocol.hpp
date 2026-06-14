@@ -120,10 +120,24 @@ struct HitRecord {
     std::uint64_t x[30]{};
 };
 
+struct ModuleMapEntry {
+    std::string module;
+    std::string path;
+    std::uint64_t start = 0;
+    std::uint64_t end = 0;
+    std::uint64_t loadBase = 0;
+};
+
 struct RecordsGetResponse {
     bool ok = false;
     std::uint32_t slot = 0;
+    std::uint64_t address = 0;
+    std::uint32_t type = 0;
+    std::uint32_t size = 0;
+    std::uint32_t recordCount = 0;
+    std::uint32_t returned = 0;
     std::vector<HitRecord> records;
+    std::vector<ModuleMapEntry> modules;
     std::string error;
 };
 
@@ -212,6 +226,61 @@ inline std::uint64_t jsonUint64Value(std::string_view json, std::string_view key
         ++i;
     }
     return value;
+}
+
+inline std::string jsonArrayValue(std::string_view json, std::string_view key) {
+    const std::string prefix = "\"" + std::string(key) + "\":[";
+    const std::size_t start = json.find(prefix);
+    if (start == std::string_view::npos) {
+        return {};
+    }
+    std::size_t pos = start + prefix.size() - 1;
+    int arrayDepth = 0;
+    int objectDepth = 0;
+    for (std::size_t i = pos; i < json.size(); ++i) {
+        if (json[i] == '[') {
+            ++arrayDepth;
+        } else if (json[i] == ']') {
+            --arrayDepth;
+            if (arrayDepth == 0 && objectDepth == 0) {
+                return std::string(json.substr(pos, i - pos + 1));
+            }
+        } else if (json[i] == '{') {
+            ++objectDepth;
+        } else if (json[i] == '}') {
+            --objectDepth;
+        }
+    }
+    return {};
+}
+
+inline std::vector<std::string> jsonObjectArrayItems(std::string_view arrayJson) {
+    std::vector<std::string> items;
+    std::size_t pos = 0;
+    while (pos < arrayJson.size()) {
+        const std::size_t objectStart = arrayJson.find('{', pos);
+        if (objectStart == std::string_view::npos) {
+            break;
+        }
+        int depth = 0;
+        std::size_t objectEnd = objectStart;
+        for (; objectEnd < arrayJson.size(); ++objectEnd) {
+            if (arrayJson[objectEnd] == '{') {
+                ++depth;
+            } else if (arrayJson[objectEnd] == '}') {
+                --depth;
+                if (depth == 0) {
+                    break;
+                }
+            }
+        }
+        if (objectEnd >= arrayJson.size()) {
+            break;
+        }
+        items.emplace_back(arrayJson.substr(objectStart, objectEnd - objectStart + 1));
+        pos = objectEnd + 1;
+    }
+    return items;
 }
 
 inline std::string hexAddress(std::uint64_t address) {
@@ -306,40 +375,18 @@ inline RecordsGetResponse parseRecordsGetResponse(std::string_view json) {
     RecordsGetResponse response;
     response.ok = jsonBoolOrFalse(json, "ok");
     response.slot = jsonUint32Value(json, "slot");
+    response.address = jsonUint64Value(json, "address");
+    response.type = jsonUint32Value(json, "type");
+    response.size = jsonUint32Value(json, "size");
+    response.recordCount = jsonUint32Value(json, "record_count");
+    response.returned = jsonUint32Value(json, "returned");
     response.error = jsonStringValue(json, "error");
     if (!response.ok) {
         return response;
     }
 
-    const std::string recordsKey = "\"records\":[";
-    const std::size_t recordsStart = json.find(recordsKey);
-    if (recordsStart == std::string_view::npos) {
-        return response;
-    }
-    std::size_t pos = recordsStart + recordsKey.size();
-    while (pos < json.size()) {
-        const std::size_t objectStart = json.find('{', pos);
-        const std::size_t arrayEnd = json.find(']', pos);
-        if (objectStart == std::string_view::npos || (arrayEnd != std::string_view::npos && arrayEnd < objectStart)) {
-            break;
-        }
-        int depth = 0;
-        std::size_t objectEnd = objectStart;
-        for (; objectEnd < json.size(); ++objectEnd) {
-            if (json[objectEnd] == '{') {
-                ++depth;
-            } else if (json[objectEnd] == '}') {
-                --depth;
-                if (depth == 0) {
-                    break;
-                }
-            }
-        }
-        if (objectEnd >= json.size()) {
-            break;
-        }
-
-        const std::string_view recordJson = json.substr(objectStart, objectEnd - objectStart + 1);
+    for (const std::string& recordObject : jsonObjectArrayItems(jsonArrayValue(json, "records"))) {
+        const std::string_view recordJson = recordObject;
         HitRecord record;
         record.hitCount = jsonUint64Value(recordJson, "hit_count");
         record.pc = jsonUint64Value(recordJson, "pc");
@@ -354,9 +401,48 @@ inline RecordsGetResponse parseRecordsGetResponse(std::string_view json) {
             record.x[i] = jsonUint64Value(recordJson, "x" + std::to_string(i));
         }
         response.records.push_back(record);
-        pos = objectEnd + 1;
+    }
+    for (const std::string& moduleObject : jsonObjectArrayItems(jsonArrayValue(json, "modules"))) {
+        const std::string_view moduleJson = moduleObject;
+        ModuleMapEntry module;
+        module.module = jsonStringValue(moduleJson, "module");
+        module.path = jsonStringValue(moduleJson, "path");
+        module.start = jsonUint64Value(moduleJson, "start");
+        module.end = jsonUint64Value(moduleJson, "end");
+        module.loadBase = jsonUint64Value(moduleJson, "load_base");
+        if (module.end > module.start) {
+            response.modules.push_back(module);
+        }
     }
     return response;
+}
+
+inline std::uint32_t visibleHitNumber(const RecordsGetResponse& records, std::size_t visibleIndex) {
+    if (records.records.empty()) {
+        return 0;
+    }
+    const std::uint32_t returned = records.returned != 0 ? records.returned : static_cast<std::uint32_t>(records.records.size());
+    const std::uint32_t recordCount = records.recordCount != 0 ? records.recordCount : returned;
+    const std::uint32_t first = recordCount > returned ? recordCount - returned + 1 : 1;
+    return first + static_cast<std::uint32_t>(visibleIndex);
+}
+
+inline std::string resolveAddressWithModules(std::uint64_t address, const std::vector<ModuleMapEntry>& modules) {
+    if (address == 0) {
+        return "-";
+    }
+    const std::string absolute = hexAddress(address);
+    for (const auto& module : modules) {
+        if (address < module.start || address >= module.end) {
+            continue;
+        }
+        const std::uint64_t base = module.loadBase != 0 ? module.loadBase : module.start;
+        const std::string name = !module.module.empty() ? module.module : module.path;
+        if (!name.empty() && address >= base) {
+            return absolute + "  " + name + "+" + hexAddress(address - base);
+        }
+    }
+    return absolute;
 }
 
 inline std::string helloRequestJson(std::uint64_t id) {
@@ -371,9 +457,20 @@ inline std::string breakpointInfoRequestJson(std::uint64_t id) {
     return "{\"id\":" + std::to_string(id) + ",\"cmd\":\"breakpoint.info\"}";
 }
 
+inline std::string recordsGetRequestJson(std::uint64_t id, std::uint32_t slot, std::string_view target);
+
 inline std::string recordsGetRequestJson(std::uint64_t id, std::uint32_t slot) {
-    return "{\"id\":" + std::to_string(id)
-        + ",\"cmd\":\"records.get\",\"slot\":" + std::to_string(slot) + "}";
+    return recordsGetRequestJson(id, slot, {});
+}
+
+inline std::string recordsGetRequestJson(std::uint64_t id, std::uint32_t slot, std::string_view target) {
+    std::string out = "{\"id\":" + std::to_string(id)
+        + ",\"cmd\":\"records.get\",\"slot\":" + std::to_string(slot);
+    if (!target.empty()) {
+        out += ",\"target\":\"" + escapeJson(target) + "\"";
+    }
+    out += "}";
+    return out;
 }
 
 inline std::string breakpointRemoveRequestJson(std::uint64_t id, std::uint32_t slot, std::string_view target = {}) {

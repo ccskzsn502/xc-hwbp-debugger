@@ -46,6 +46,8 @@ int main(int argc, char** argv) {
             "request handling must not copy hwbp_point onto the stack");
     require(contains(mainCpp, "kMaxRecordsPerResponse"),
             "records.get must cap returned records so one JSONL response stays below the PC receive limit");
+    require(contains(mainCpp, "entry.loadBase = start >= fileOffset ? start - fileOffset : start") && contains(mainCpp, "modulesJson(selectedMaps)"),
+            "records.get must return selected target maps with load bases derived from /proc/<pid>/maps file offsets");
 
     std::cout << "agent contract tests passed\n";
     return 0;

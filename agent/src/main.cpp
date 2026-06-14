@@ -19,6 +19,7 @@
 #include <sstream>
 #include <string>
 #include <thread>
+#include <vector>
 
 namespace {
 
@@ -123,6 +124,14 @@ struct module_info {
 struct region_info {
     std::uint64_t start;
     std::uint64_t end;
+};
+
+struct ProcessMapEntry {
+    std::string module;
+    std::string path;
+    std::uint64_t start = 0;
+    std::uint64_t end = 0;
+    std::uint64_t loadBase = 0;
 };
 
 struct memory_info {
@@ -235,6 +244,76 @@ bool pathMatchesModule(const std::string& path, const std::string& module) {
     return path.compare(start, module.size(), module) == 0 && (start == 0 || path[start - 1] == '/');
 }
 
+std::string basenameFromPath(const std::string& path) {
+    const std::size_t slash = path.find_last_of('/');
+    if (slash == std::string::npos) {
+        return path;
+    }
+    return path.substr(slash + 1);
+}
+
+bool parseMapLine(const std::string& line, ProcessMapEntry& entry) {
+    std::istringstream parts(line);
+    std::string range;
+    std::string perms;
+    std::string offsetText;
+    std::string dev;
+    std::string inode;
+    std::string path;
+    parts >> range >> perms >> offsetText >> dev >> inode;
+    std::getline(parts, path);
+    while (!path.empty() && (path.front() == ' ' || path.front() == '\t')) {
+        path.erase(path.begin());
+    }
+    const std::size_t dash = range.find('-');
+    std::uint64_t start = 0;
+    std::uint64_t end = 0;
+    std::uint64_t fileOffset = 0;
+    if (dash == std::string::npos || !parseHex64(range.substr(0, dash), start) || !parseHex64(range.substr(dash + 1), end) || !parseHex64(offsetText, fileOffset)) {
+        return false;
+    }
+    if (path.empty()) {
+        path = "[anonymous]";
+    }
+    entry.path = path;
+    entry.module = path.front() == '[' ? path : basenameFromPath(path);
+    entry.start = start;
+    entry.end = end;
+    entry.loadBase = start >= fileOffset ? start - fileOffset : start;
+    return entry.end > entry.start;
+}
+
+std::vector<ProcessMapEntry> readProcessMaps(int pid) {
+    std::vector<ProcessMapEntry> maps;
+    if (pid <= 0) {
+        return maps;
+    }
+    std::ifstream input("/proc/" + std::to_string(pid) + "/maps");
+    if (!input) {
+        return maps;
+    }
+    std::string line;
+    while (std::getline(input, line)) {
+        ProcessMapEntry entry;
+        if (parseMapLine(line, entry)) {
+            maps.push_back(entry);
+        }
+    }
+    return maps;
+}
+
+const ProcessMapEntry* findMapForAddress(const std::vector<ProcessMapEntry>& maps, std::uint64_t address) {
+    if (address == 0) {
+        return nullptr;
+    }
+    for (const auto& entry : maps) {
+        if (address >= entry.start && address < entry.end) {
+            return &entry;
+        }
+    }
+    return nullptr;
+}
+
 std::string readProcessName(int pid) {
     std::string cmdline = readTextFile(("/proc/" + std::to_string(pid) + "/cmdline").c_str());
     for (char& c : cmdline) {
@@ -285,39 +364,16 @@ bool resolveModuleBaseFromMaps(int pid, const std::string& module, std::uint64_t
         error = "module+offset breakpoint requires a resolved target pid";
         return false;
     }
-    std::ifstream maps("/proc/" + std::to_string(pid) + "/maps");
-    if (!maps) {
+    const std::vector<ProcessMapEntry> maps = readProcessMaps(pid);
+    if (maps.empty()) {
         error = "failed to open /proc/" + std::to_string(pid) + "/maps";
         return false;
     }
-    std::string line;
-    while (std::getline(maps, line)) {
-        std::istringstream parts(line);
-        std::string range;
-        std::string perms;
-        std::string offset;
-        std::string dev;
-        std::string inode;
-        std::string path;
-        parts >> range >> perms >> offset >> dev >> inode;
-        std::getline(parts, path);
-        while (!path.empty() && (path.front() == ' ' || path.front() == '\t')) {
-            path.erase(path.begin());
+    for (const auto& entry : maps) {
+        if (pathMatchesModule(entry.path, module) || entry.module == module) {
+            base = entry.loadBase;
+            return true;
         }
-        const std::size_t dash = range.find('-');
-        std::uint64_t start = 0;
-        if (dash == std::string::npos || !parseHex64(range.substr(0, dash), start)) {
-            continue;
-        }
-        if (pathMatchesModule(path, module) && (perms.find('x') != std::string::npos || base == 0)) {
-            base = start;
-            if (perms.find('x') != std::string::npos) {
-                return true;
-            }
-        }
-    }
-    if (base != 0) {
-        return true;
     }
     error = "module not found in target maps: " + module;
     return false;
@@ -706,26 +762,71 @@ std::string recordJson(const hwbp_record& record) {
     return out;
 }
 
-std::string recordsGetJson(std::uint64_t id, std::uint32_t slot, const hwbp_point& point) {
-    int count = point.record_count;
-    if (count < 0) {
-        count = 0;
+void addMapForAddress(std::vector<ProcessMapEntry>& selected, const std::vector<ProcessMapEntry>& maps, std::uint64_t address) {
+    const ProcessMapEntry* entry = findMapForAddress(maps, address);
+    if (!entry) {
+        return;
     }
-    if (count > 0x100) {
-        count = 0x100;
+    for (const auto& existing : selected) {
+        if (existing.start == entry->start && existing.end == entry->end && existing.path == entry->path) {
+            return;
+        }
     }
-    const int start = count > kMaxRecordsPerResponse ? count - kMaxRecordsPerResponse : 0;
-    const int returned = count - start;
+    selected.push_back(*entry);
+}
+
+std::string modulesJson(const std::vector<ProcessMapEntry>& modules) {
+    std::string out = "[";
+    for (std::size_t i = 0; i < modules.size(); ++i) {
+        if (i != 0) {
+            out += ",";
+        }
+        const auto& module = modules[i];
+        out += "{\"module\":\"" + escapeJson(module.module)
+            + "\",\"path\":\"" + escapeJson(module.path)
+            + "\",\"start\":\"" + xc::hexAddress(module.start)
+            + "\",\"end\":\"" + xc::hexAddress(module.end)
+            + "\",\"load_base\":\"" + xc::hexAddress(module.loadBase)
+            + "\"}";
+    }
+    out += "]";
+    return out;
+}
+
+std::string recordsGetJson(std::uint64_t id, std::uint32_t slot, const hwbp_point& point, const std::vector<ProcessMapEntry>& maps) {
+    int totalCount = point.record_count;
+    if (totalCount < 0) {
+        totalCount = 0;
+    }
+    const int storedCount = totalCount > 0x100 ? 0x100 : totalCount;
+    const int start = storedCount > kMaxRecordsPerResponse ? storedCount - kMaxRecordsPerResponse : 0;
+    const int returned = storedCount - start;
+
+    std::vector<ProcessMapEntry> selectedMaps;
+    for (int i = start; i < storedCount; ++i) {
+        const hwbp_record& record = point.records[i];
+        const std::uint64_t regs[] = {
+            record.pc, record.lr, record.sp, record.orig_x0, record.x0, record.x1, record.x2, record.x3,
+            record.x4, record.x5, record.x6, record.x7, record.x8, record.x9, record.x10, record.x11,
+            record.x12, record.x13, record.x14, record.x15, record.x16, record.x17, record.x18, record.x19,
+            record.x20, record.x21, record.x22, record.x23, record.x24, record.x25, record.x26, record.x27,
+            record.x28, record.x29,
+        };
+        for (std::uint64_t address : regs) {
+            addMapForAddress(selectedMaps, maps, address);
+        }
+    }
 
     std::string out = "{\"id\":" + std::to_string(id)
         + ",\"ok\":true,\"slot\":" + std::to_string(slot)
         + ",\"address\":\"" + xc::hexAddress(point.hit_addr)
         + "\",\"type\":" + std::to_string(static_cast<int>(point.bt))
         + ",\"size\":" + std::to_string(static_cast<int>(point.bl))
-        + ",\"record_count\":" + std::to_string(count)
+        + ",\"record_count\":" + std::to_string(totalCount)
         + ",\"returned\":" + std::to_string(returned)
+        + ",\"modules\":" + modulesJson(selectedMaps)
         + ",\"records\":[";
-    for (int i = start; i < count; ++i) {
+    for (int i = start; i < storedCount; ++i) {
         if (i != start) {
             out += ",";
         }
@@ -811,10 +912,22 @@ void handleClient(int clientFd, LsdriverBackend& breakpoints) {
             }
         } else if (request.find("records.get") != std::string::npos) {
             const std::uint32_t slot = xc::jsonUint32Value(request, "slot");
+            const std::string target = xc::jsonStringValue(request, "target");
             std::string error;
             const hwbp_point* point = breakpoints.refreshRecords(slot, error);
             if (point) {
-                sendLine(clientFd, recordsGetJson(requestId == 0 ? 1 : requestId, slot, *point));
+                std::vector<ProcessMapEntry> maps;
+                if (!target.empty()) {
+                    int mapsPid = 0;
+                    if (isDigits(target)) {
+                        mapsPid = std::stoi(target);
+                    } else {
+                        std::string pidError;
+                        findPidByName(target, mapsPid, pidError);
+                    }
+                    maps = readProcessMaps(mapsPid);
+                }
+                sendLine(clientFd, recordsGetJson(requestId == 0 ? 1 : requestId, slot, *point, maps));
             } else {
                 sendLine(clientFd, "{\"id\":" + std::to_string(requestId == 0 ? 1 : requestId) + ",\"ok\":false,\"error\":\"" + escapeJson(error) + "\"}");
             }

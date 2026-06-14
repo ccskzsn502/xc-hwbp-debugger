@@ -77,16 +77,28 @@ int main() {
     require(recordsRequest == R"({"id":10,"cmd":"records.get","slot":2})",
             "records.get request should serialize slot");
     const auto records = xc::parseRecordsGetResponse(
-        R"({"id":10,"ok":true,"slot":2,"records":[{"hit_count":3,"pc":"0x78919cff84","lr":"0x78919cff90","sp":"0x7fd0011000","pstate":"0x60000000","syscallno":"0x0","x0":"0x11","x1":"0x22","x2":"0x33","x3":"0x44"}]})");
+        R"({"id":10,"ok":true,"slot":2,"address":"0x78919cff80","type":4,"size":4,"record_count":12,"returned":1,"modules":[{"module":"libtersafe.so","path":"/data/app/libtersafe.so","start":"0x7891900000","end":"0x7891a00000","load_base":"0x7891900000"},{"module":"[stack]","path":"[stack]","start":"0x7fd0010000","end":"0x7fd0020000","load_base":"0x7fd0010000"}],"records":[{"hit_count":1,"pc":"0x78919cff84","lr":"0x78919cff90","sp":"0x7fd0011000","pstate":"0x60000000","syscallno":"0x0","x0":"0x11","x1":"0x22","x2":"0x33","x3":"0x44"}]})");
     require(records.ok, "records.get ok should parse");
     require(records.slot == 2, "records.get slot should parse");
+    require(records.address == 0x78919CFF80ULL, "records.get breakpoint address should parse");
+    require(records.type == 4, "records.get breakpoint type should parse");
+    require(records.size == 4, "records.get breakpoint size should parse");
+    require(records.recordCount == 12, "records.get record_count should parse for cumulative hit numbering");
+    require(records.returned == 1, "records.get returned should parse for visible hit window numbering");
     require(records.records.size() == 1, "records.get should parse one hit record");
-    require(records.records[0].hitCount == 3, "records.get hit count should parse");
+    require(records.records[0].hitCount == 1, "records.get per-record hit_count should parse even when driver stores 1 per snapshot");
     require(records.records[0].pc == 0x78919CFF84ULL, "records.get pc should parse");
     require(records.records[0].lr == 0x78919CFF90ULL, "records.get lr should parse");
     require(records.records[0].sp == 0x7FD0011000ULL, "records.get sp should parse");
     require(records.records[0].x[0] == 0x11, "records.get x0 should parse");
     require(records.records[0].x[3] == 0x44, "records.get x3 should parse");
+    require(records.modules.size() == 2, "records.get should parse agent maps needed for precise module+offset rendering");
+    require(records.modules[0].module == "libtersafe.so", "records.get module name should parse");
+    require(records.modules[0].loadBase == 0x7891900000ULL, "records.get module load base should parse");
+    require(records.modules[1].module == "[stack]", "records.get stack mapping should parse");
+    require(xc::visibleHitNumber(records, 0) == 12, "visible hit number should use record_count/returned instead of per-record hit_count");
+    require(xc::resolveAddressWithModules(records.records[0].pc, records.modules) == "0x78919cff84  libtersafe.so+0xcff84", "PC should resolve through agent maps");
+    require(xc::resolveAddressWithModules(records.records[0].sp, records.modules) == "0x7fd0011000  [stack]+0x1000", "SP should resolve through stack map");
 
     const auto recordsFailed = xc::parseRecordsGetResponse(R"({"id":11,"ok":false,"error":"slot out of range"})");
     require(!recordsFailed.ok, "failed records.get should parse ok=false");

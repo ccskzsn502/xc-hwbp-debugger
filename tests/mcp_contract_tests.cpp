@@ -52,6 +52,8 @@ int main(int argc, char** argv) {
             "MCP tools should let AI connect and inspect driver/breakpoint state");
     require(contains(mainCpp, "set_breakpoint") && contains(mainCpp, "remove_breakpoint") && contains(mainCpp, "get_hit_records"),
             "MCP tools should let AI manage breakpoints and fetch hit records");
+    require(contains(mainCpp, "list_hit_records") && contains(mainCpp, "formatHitList"),
+            "MCP server should expose an AI-readable hit list with stable cumulative hit numbers");
     require(contains(mainCpp, "breakpoint_info") && contains(mainCpp, "read_hit_snapshot"),
             "MCP tools should expose raw breakpoint info and selected hit snapshots");
     require(contains(mainCpp, "breakpointSetModuleRequestJson") && contains(mainCpp, "breakpointSetRequestJson") && contains(mainCpp, "recordsGetRequestJson"),
@@ -60,6 +62,8 @@ int main(int argc, char** argv) {
             "MCP server should own a persistent Agent TCP session like the GUI");
     require(contains(mainCpp, "formatHitSnapshot") && contains(mainCpp, "hit_count") && contains(mainCpp, "PC") && contains(mainCpp, "LR") && contains(mainCpp, "SP"),
             "MCP server should return AI-readable hit snapshot text with PC/LR/SP and hit counts");
+    require(contains(mainCpp, "visibleHitNumber") && contains(mainCpp, "resolveAddressWithModules") && contains(mainCpp, "record_count") && contains(mainCpp, "returned"),
+            "MCP hit output should use shared cumulative hit numbering and agent map address resolution");
 
     std::cout << "mcp contract tests passed\n";
     return 0;

@@ -11,6 +11,7 @@
 
 #include <QAbstractItemView>
 #include <QApplication>
+#include <QClipboard>
 #include <QComboBox>
 #include <QFont>
 #include <QFrame>
@@ -38,6 +39,7 @@
 #include <cstdint>
 #include <sstream>
 #include <string>
+#include <vector>
 
 #ifndef _WIN32
 #include <arpa/inet.h>
@@ -154,9 +156,7 @@ std::string displayAddress(const BreakpointAddressInput& input) {
 }
 
 struct AddressResolverContext {
-    std::string module;
-    std::uint64_t moduleBase = 0;
-    bool hasModuleBase = false;
+    std::vector<xc::ModuleMapEntry> modules;
 };
 
 std::string padLabel(std::string label) {
@@ -167,14 +167,7 @@ std::string padLabel(std::string label) {
 }
 
 std::string resolveAddressLabel(std::uint64_t address, const AddressResolverContext& context) {
-    if (address == 0) {
-        return "-";
-    }
-    const std::string absolute = xc::hexAddress(address);
-    if (context.hasModuleBase && !context.module.empty() && address >= context.moduleBase) {
-        return absolute + "  " + context.module + "+" + xc::hexAddress(address - context.moduleBase);
-    }
-    return absolute;
+    return xc::resolveAddressWithModules(address, context.modules);
 }
 
 std::string registerLine(const std::string& name, std::uint64_t value) {
@@ -192,7 +185,15 @@ std::string formatHitSnapshot(const xc::RecordsGetResponse& records, const xc::H
 
     std::ostringstream out;
     out << "命中快照\n\n";
-    out << "slot " << records.slot << "   hit #" << hit->hitCount << "\n";
+    std::size_t index = 0;
+    for (std::size_t i = 0; i < records.records.size(); ++i) {
+        if (&records.records[i] == hit) {
+            index = i;
+            break;
+        }
+    }
+    out << "slot " << records.slot << "   hit #" << xc::visibleHitNumber(records, index)
+        << "   raw_hit_count " << hit->hitCount << "\n";
     out << addressLine("PC", hit->pc, context) << "\n";
     out << addressLine("LR", hit->lr, context) << "\n";
     out << addressLine("SP", hit->sp, context) << "\n\n";
@@ -204,6 +205,25 @@ std::string formatHitSnapshot(const xc::RecordsGetResponse& records, const xc::H
         out << registerLine("X" + std::to_string(i), hit->x[i]) << "\n";
     }
     out << registerLine("X29", hit->x[29]) << "\n";
+    return out.str();
+}
+
+std::string formatHitListText(const xc::RecordsGetResponse& records, const AddressResolverContext& context) {
+    if (!records.ok) {
+        return "records.get failed: " + records.error;
+    }
+    if (records.records.empty()) {
+        return "no hit records";
+    }
+    std::ostringstream out;
+    out << "slot " << records.slot << " record_count " << records.recordCount << " returned " << records.returned << "\n";
+    for (std::size_t i = 0; i < records.records.size(); ++i) {
+        const auto& hit = records.records[i];
+        out << "#" << xc::visibleHitNumber(records, i)
+            << " PC " << resolveAddressLabel(hit.pc, context)
+            << " LR " << resolveAddressLabel(hit.lr, context)
+            << " SP " << resolveAddressLabel(hit.sp, context) << "\n";
+    }
     return out.str();
 }
 
@@ -375,9 +395,11 @@ void setupTable(QTableWidget* table, const QStringList& headers) {
     table->setEditTriggers(QAbstractItemView::NoEditTriggers);
     table->setAlternatingRowColors(true);
     table->setShowGrid(false);
+    table->setGridStyle(Qt::NoPen);
+    table->setFrameShape(QFrame::NoFrame);
     table->setWordWrap(false);
     table->setFocusPolicy(Qt::NoFocus);
-    table->verticalHeader()->setDefaultSectionSize(30);
+    table->verticalHeader()->setDefaultSectionSize(26);
     table->horizontalHeader()->setHighlightSections(false);
 }
 
@@ -613,18 +635,32 @@ private:
         emptyDataLabel_->setAlignment(Qt::AlignCenter);
         emptyDataLabel_->setMinimumHeight(38);
 
+        auto* copyBar = new QHBoxLayout;
+        copyBar->setContentsMargins(0, 0, 0, 0);
+        copyBar->setSpacing(6);
+        auto* copyCurrentButton = actionButton("复制当前命中", "secondaryButton");
+        auto* copyAllButton = actionButton("复制全部命中", "secondaryButton");
+        copyBar->addStretch(1);
+        copyBar->addWidget(copyCurrentButton);
+        copyBar->addWidget(copyAllButton);
+        connect(copyCurrentButton, &QPushButton::clicked, this, [this] { copyCurrentHit(); });
+        connect(copyAllButton, &QPushButton::clicked, this, [this] { copyAllHits(); });
+
         auto* detailSplitter = new QSplitter(Qt::Vertical);
         hitSnapshotText_ = new QPlainTextEdit;
         hitSnapshotText_->setReadOnly(true);
         hitSnapshotText_->setObjectName("hitSnapshotText");
+        hitSnapshotText_->setFrameShape(QFrame::NoFrame);
         infoText_ = new QPlainTextEdit;
         infoText_->setReadOnly(true);
         infoText_->setObjectName("infoText");
+        infoText_->setFrameShape(QFrame::NoFrame);
         detailSplitter->addWidget(hitSnapshotText_);
         detailSplitter->addWidget(infoText_);
         detailSplitter->setSizes({500, 150});
 
         layout->addWidget(emptyDataLabel_);
+        layout->addLayout(copyBar);
         layout->addWidget(detailSplitter, 1);
         return box;
     }
@@ -851,7 +887,7 @@ private:
     void queryHitRecords(std::uint32_t slot) {
         std::string error;
         const std::string responseLine = sendAgentRequest(
-            xc::recordsGetRequestJson(state_.requestId++, slot),
+            xc::recordsGetRequestJson(state_.requestId++, slot, state_.target),
             error,
             "发送 records.get 失败");
         if (responseLine.empty()) {
@@ -951,6 +987,18 @@ private:
         hitSnapshotText_->setPlainText(qstr(formatHitSnapshot(state_.hitRecords, currentHitRecord(), resolverContext())));
     }
 
+    void copyCurrentHit() {
+        QApplication::clipboard()->setText(hitSnapshotText_->toPlainText());
+        state_.lastAction = "已复制当前命中快照";
+        statusBar()->showMessage(qstr(state_.lastAction));
+    }
+
+    void copyAllHits() {
+        QApplication::clipboard()->setText(qstr(formatHitListText(state_.hitRecords, resolverContext())));
+        state_.lastAction = "已复制全部命中列表";
+        statusBar()->showMessage(qstr(state_.lastAction));
+    }
+
     const xc::HitRecord* currentHitRecord() const {
         if (!state_.hitRecords.ok || state_.hitRecords.records.empty()) {
             return nullptr;
@@ -961,22 +1009,7 @@ private:
 
     AddressResolverContext resolverContext() const {
         AddressResolverContext context;
-        if (state_.hitRecords.slot >= 4) {
-            return context;
-        }
-        const auto& label = state_.breakpointLabels[state_.hitRecords.slot];
-        const auto& breakpoint = state_.breakpoints[state_.hitRecords.slot];
-        const std::size_t plus = label.find('+');
-        if (plus == std::string::npos || !breakpoint.ok || breakpoint.address == 0) {
-            return context;
-        }
-        std::uint64_t offset = 0;
-        if (!parseUnsigned64(label.substr(plus + 1), offset) || breakpoint.address < offset) {
-            return context;
-        }
-        context.module = label.substr(0, plus);
-        context.moduleBase = breakpoint.address - offset;
-        context.hasModuleBase = true;
+        context.modules = state_.hitRecords.modules;
         return context;
     }
 
@@ -991,7 +1024,7 @@ private:
         hitRecordsTable_->setRowCount(static_cast<int>(state_.hitRecords.records.size()));
         for (int row = 0; row < static_cast<int>(state_.hitRecords.records.size()); ++row) {
             const auto& hit = state_.hitRecords.records[static_cast<std::size_t>(row)];
-            hitRecordsTable_->setItem(row, 0, cell(QString("#%1").arg(hit.hitCount)));
+            hitRecordsTable_->setItem(row, 0, cell(QString("#%1").arg(xc::visibleHitNumber(state_.hitRecords, static_cast<std::size_t>(row)))));
             hitRecordsTable_->setItem(row, 1, cell(qstr(resolveAddressLabel(hit.pc, context))));
             hitRecordsTable_->setItem(row, 2, cell(qstr(resolveAddressLabel(hit.lr, context))));
         }
@@ -1046,8 +1079,8 @@ private:
             QLabel[role="statusPill"][state="warn"] { color: #ffd166; border-color: #80652a; background: #211c10; }
             QLabel[role="statusPill"][state="bad"] { color: #ff9aa2; border-color: #7a3b44; background: #241419; }
             QHeaderView::section { background: #202832; border: none; border-right: 1px solid #344050; color: #cdd7e3; padding: 7px 8px; font-weight: 600; }
-            QTableWidget { alternate-background-color: #11171e; gridline-color: #24303c; }
-            QTableWidget::item { padding: 4px 6px; }
+            QTableWidget { alternate-background-color: #0e1319; gridline-color: transparent; }
+            QTableWidget::item { padding: 2px 6px; border: none; }
             QTableWidget::item:selected { background: #1f5f87; color: #ffffff; }
             QPlainTextEdit { font-family: "Cascadia Mono", "Consolas"; font-size: 12px; line-height: 1.32; padding: 7px; }
             QLabel#emptyDataLabel { background: #0b0f14; border: 1px dashed #3d4a5a; border-radius: 6px; color: #9ed2ff; font-size: 13px; font-weight: 600; }

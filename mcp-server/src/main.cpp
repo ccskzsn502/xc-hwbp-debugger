@@ -322,16 +322,42 @@ std::string formatHitSnapshot(const xc::RecordsGetResponse& records, std::uint32
     }
     const auto& hit = records.records[index];
     std::ostringstream out;
-    out << "slot " << records.slot << " hit_count " << hit.hitCount << "\n";
-    out << "PC " << xc::hexAddress(hit.pc) << "\n";
-    out << "LR " << xc::hexAddress(hit.lr) << "\n";
-    out << "SP " << xc::hexAddress(hit.sp) << "\n";
+    out << "slot " << records.slot << " hit #" << xc::visibleHitNumber(records, index)
+        << " raw_hit_count " << hit.hitCount
+        << " record_count " << records.recordCount
+        << " returned " << records.returned << "\n";
+    out << "PC " << xc::resolveAddressWithModules(hit.pc, records.modules) << "\n";
+    out << "LR " << xc::resolveAddressWithModules(hit.lr, records.modules) << "\n";
+    out << "SP " << xc::resolveAddressWithModules(hit.sp, records.modules) << "\n";
     out << "PSTATE " << xc::hexAddress(hit.pstate) << "\n";
     out << "SYSCALL " << xc::hexAddress(hit.syscallno) << "\n";
     out << "FPSR " << hit.fpsr << "\n";
     out << "FPCR " << hit.fpcr << "\n";
     for (int i = 0; i < 30; ++i) {
-        out << "X" << i << " " << xc::hexAddress(hit.x[i]) << "\n";
+        out << "X" << i << " " << xc::resolveAddressWithModules(hit.x[i], records.modules) << "\n";
+    }
+    return out.str();
+}
+
+std::string formatHitList(const xc::RecordsGetResponse& records) {
+    if (!records.ok) {
+        return "records.get failed: " + records.error;
+    }
+    if (records.records.empty()) {
+        return "no hit records for slot " + std::to_string(records.slot);
+    }
+    std::ostringstream out;
+    out << "slot " << records.slot
+        << " address " << xc::resolveAddressWithModules(records.address, records.modules)
+        << " record_count " << records.recordCount
+        << " returned " << records.returned << "\n";
+    for (std::size_t i = 0; i < records.records.size(); ++i) {
+        const auto& hit = records.records[i];
+        out << "#" << xc::visibleHitNumber(records, i)
+            << " PC " << xc::resolveAddressWithModules(hit.pc, records.modules)
+            << " LR " << xc::resolveAddressWithModules(hit.lr, records.modules)
+            << " SP " << xc::resolveAddressWithModules(hit.sp, records.modules)
+            << " raw_hit_count " << hit.hitCount << "\n";
     }
     return out.str();
 }
@@ -354,6 +380,7 @@ std::string toolsListResponse(std::uint64_t id) {
     const std::string endpointProp = "\"endpoint\":{\"type\":\"string\",\"description\":\"Agent IPv4 address\"}";
     const std::string targetProp = "\"target\":{\"type\":\"string\",\"description\":\"Process name or pid\"}";
     const std::string slotProp = "\"slot\":{\"type\":\"integer\",\"minimum\":0,\"maximum\":3}";
+    const std::string recordsProps = slotProp + "," + targetProp;
     const std::string breakpointProps = slotProp + ",\"address\":{\"type\":\"string\",\"description\":\"Absolute address like 0x1234 or module+offset like lib.so+0x1234\"},\"type\":{\"type\":\"string\",\"enum\":[\"execute\",\"read\",\"write\",\"access\"]},\"size\":{\"type\":\"integer\",\"minimum\":1,\"maximum\":8}," + targetProp;
     const std::string tools = "["
         + toolSchema("connect_agent", "Connect to the Android HWBP agent and keep a persistent session", endpointProp, "[\"endpoint\"]") + ","
@@ -362,8 +389,9 @@ std::string toolsListResponse(std::uint64_t id) {
         + toolSchema("remove_breakpoint", "Remove a hardware breakpoint slot", slotProp + "," + targetProp, "[\"slot\"]") + ","
         + toolSchema("breakpoint_info", "Fetch raw breakpoint.info JSON from the agent", "") + ","
         + toolSchema("list_breakpoints", "Alias for breakpoint_info for AI breakpoint inspection", "") + ","
-        + toolSchema("get_hit_records", "Fetch raw records.get JSON for a breakpoint slot", slotProp, "[\"slot\"]") + ","
-        + toolSchema("read_hit_snapshot", "Fetch records.get and return an AI-readable selected hit snapshot", slotProp + ",\"index\":{\"type\":\"integer\",\"minimum\":0}", "[\"slot\"]")
+        + toolSchema("get_hit_records", "Fetch raw records.get JSON for a breakpoint slot", recordsProps, "[\"slot\"]") + ","
+        + toolSchema("list_hit_records", "Fetch records.get and return an AI-readable hit list with module offsets", recordsProps, "[\"slot\"]") + ","
+        + toolSchema("read_hit_snapshot", "Fetch records.get and return an AI-readable selected hit snapshot", recordsProps + ",\"index\":{\"type\":\"integer\",\"minimum\":0}", "[\"slot\"]")
         + "]";
     return jsonResult(id, "{\"tools\":" + tools + "}");
 }
@@ -434,13 +462,25 @@ std::string callTool(McpState& state, std::uint64_t id, std::string_view request
     }
     if (name == "get_hit_records") {
         const std::uint32_t slot = uint32Arg(args, "slot", 0);
-        return rawAgentTool(state, id, xc::recordsGetRequestJson(state.requestId++, slot));
+        state.target = stringArg(args, "target", state.target);
+        return rawAgentTool(state, id, xc::recordsGetRequestJson(state.requestId++, slot, state.target));
+    }
+    if (name == "list_hit_records") {
+        const std::uint32_t slot = uint32Arg(args, "slot", 0);
+        state.target = stringArg(args, "target", state.target);
+        std::string error;
+        const std::string response = sendAgentRequest(state, xc::recordsGetRequestJson(state.requestId++, slot, state.target), error);
+        if (response.empty()) {
+            return textResult(id, "records.get failed: " + error);
+        }
+        return textResult(id, formatHitList(xc::parseRecordsGetResponse(response)));
     }
     if (name == "read_hit_snapshot") {
         const std::uint32_t slot = uint32Arg(args, "slot", 0);
         const std::uint32_t index = uint32Arg(args, "index", 0);
+        state.target = stringArg(args, "target", state.target);
         std::string error;
-        const std::string response = sendAgentRequest(state, xc::recordsGetRequestJson(state.requestId++, slot), error);
+        const std::string response = sendAgentRequest(state, xc::recordsGetRequestJson(state.requestId++, slot, state.target), error);
         if (response.empty()) {
             return textResult(id, "records.get failed: " + error);
         }

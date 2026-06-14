@@ -34,7 +34,7 @@ cmake -S . -B build-mcp -DXC_BUILD_AGENT=OFF -DXC_BUILD_PC_CLIENT=OFF -DXC_BUILD
 cmake --build build-mcp --parallel
 ```
 
-`xc-hwbp-mcp` 是独立 PC-side MCP stdio server。AI 客户端可以通过 MCP 调用 `connect_agent`、`driver_status`、`set_breakpoint`、`remove_breakpoint`、`breakpoint_info`、`list_breakpoints`、`get_hit_records` 和 `read_hit_snapshot`，从而获取断点信息和命中寄存器快照。
+`xc-hwbp-mcp` 是独立 PC-side MCP stdio server。AI 客户端可以通过 MCP 调用 `connect_agent`、`driver_status`、`set_breakpoint`、`remove_breakpoint`、`breakpoint_info`、`list_breakpoints`、`get_hit_records`、`list_hit_records` 和 `read_hit_snapshot`，从而获取断点信息、累计命中列表、命中寄存器快照，以及 agent 基于 `/proc/<pid>/maps` 解析出的 `so+offset`。
 
 ## 本地运行测试
 

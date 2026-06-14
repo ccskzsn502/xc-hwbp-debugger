@@ -97,18 +97,26 @@ int main(int argc, char** argv) {
             "debugger actions should have primary, secondary and destructive visual hierarchy");
     require(contains(mainCpp, "QFrame#connectionBar") && contains(mainCpp, "QFrame#breakpointEditor") && contains(mainCpp, "border-radius: 6px"),
             "Qt stylesheet should define distinct professional dark debugger panels");
-    require(contains(mainCpp, "font-size: 12px") && contains(mainCpp, "setDefaultSectionSize(30)"),
+    require(contains(mainCpp, "font-size: 12px") && contains(mainCpp, "setDefaultSectionSize(26)"),
             "debugger UI should use compact fonts and table rows for dense hit inspection");
     require(contains(mainCpp, "breakpointsTable_") && !contains(mainCpp, "watchTable_") && !contains(mainCpp, "slotsTable_"),
             "watch breakpoints and breakpoint slots should be one linked breakpoint list, not two unrelated panes");
     require(contains(mainCpp, "hitRecordsTable_") && contains(mainCpp, "refreshHitRecordsTable") && contains(mainCpp, "selectedHitIndex_"),
             "PC GUI should show a selectable hit list under the breakpoint list instead of only the latest hit");
+    require(!contains(mainCpp, "hitRecordsTable_->setItem(row, 0, cell(QString(\"#%1\").arg(hit.hitCount)))") && contains(mainCpp, "visibleHitNumber"),
+            "hit list must number visible rows from record_count/returned instead of repeating per-record hit_count");
+    require(contains(mainCpp, "copyCurrentHit") && contains(mainCpp, "copyAllHits") && contains(mainCpp, "QApplication::clipboard"),
+            "hit snapshot and hit list should have explicit copy actions");
+    require(contains(mainCpp, "setGridStyle(Qt::NoPen)") && contains(mainCpp, "setFrameShape(QFrame::NoFrame)"),
+            "debugger panes should use a more minimal visual style with fewer grid lines and frames");
     require(contains(mainCpp, "itemSelectionChanged") && contains(mainCpp, "currentHitRecord"),
             "selecting a hit row should switch the rendered register snapshot");
     require(contains(mainCpp, "formatHitSnapshot") && contains(mainCpp, "X29") && !contains(mainCpp, "formatLatestHitStack"),
             "registers and PC/LR/SP should render as one hit snapshot with one register per line, not split panes");
     require(contains(mainCpp, "resolveAddressLabel") && contains(mainCpp, "AddressResolverContext"),
-            "address rendering should go through a resolver context that can later consume agent maps");
+            "address rendering should go through a resolver context that consumes agent maps");
+    require(contains(mainCpp, "resolveAddressWithModules") && !contains(mainCpp, "breakpoint.address - offset"),
+            "module+offset rendering must use agent-provided maps instead of deriving one breakpoint base on the PC");
     require(contains(mainCpp, "命中详情") && contains(mainCpp, "hitSnapshotText_") && !contains(mainCpp, "stackText_"),
             "registers and stack should render in one combined hit snapshot view");
     require(contains(mainCpp, "parseBreakpointAddress") && contains(mainCpp, "libtersafe.so+0x488F08"),
