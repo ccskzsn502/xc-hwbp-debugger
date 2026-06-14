@@ -15,7 +15,6 @@
 #include <QComboBox>
 #include <QFont>
 #include <QFrame>
-#include <QGroupBox>
 #include <QGuiApplication>
 #include <QHBoxLayout>
 #include <QHeaderView>
@@ -202,9 +201,9 @@ std::string formatHitSnapshot(const xc::RecordsGetResponse& records, const xc::H
     out << padLabel("FPSR") << hit->fpsr << "\n";
     out << padLabel("FPCR") << hit->fpcr << "\n\n";
     for (int i = 0; i < 29; ++i) {
-        out << registerLine("X" + std::to_string(i), hit->x[i]) << "\n";
+        out << addressLine("X" + std::to_string(i), hit->x[i], context) << "\n";
     }
-    out << registerLine("X29", hit->x[29]) << "\n";
+    out << addressLine("X29", hit->x[29], context) << "\n";
     return out.str();
 }
 
@@ -224,6 +223,19 @@ std::string formatHitListText(const xc::RecordsGetResponse& records, const Addre
             << " LR " << resolveAddressLabel(hit.lr, context)
             << " SP " << resolveAddressLabel(hit.sp, context) << "\n";
     }
+    return out.str();
+}
+
+std::string hitSummaryLine(const xc::RecordsGetResponse& records, std::size_t index, const AddressResolverContext& context) {
+    if (index >= records.records.size()) {
+        return {};
+    }
+    const auto& hit = records.records[index];
+    std::ostringstream out;
+    out << "PC " << resolveAddressLabel(hit.pc, context)
+        << "   LR " << resolveAddressLabel(hit.lr, context)
+        << "   SP " << resolveAddressLabel(hit.sp, context)
+        << "   raw " << hit.hitCount;
     return out.str();
 }
 
@@ -446,13 +458,6 @@ private:
         return label;
     }
 
-    QLabel* statusPill() {
-        auto* label = new QLabel;
-        label->setProperty("role", "statusPill");
-        label->setAlignment(Qt::AlignCenter);
-        return label;
-    }
-
     QPushButton* actionButton(const QString& text, const char* role) {
         auto* button = new QPushButton(text);
         button->setProperty("role", role);
@@ -462,16 +467,14 @@ private:
     void buildUi() {
         auto* central = new QWidget;
         auto* root = new QVBoxLayout(central);
-        root->setContentsMargins(10, 10, 10, 8);
-        root->setSpacing(8);
-        root->addWidget(buildConnectionBar());
-        root->addWidget(buildBreakpointEditor());
-        root->addWidget(buildStatusStrip());
+        root->setContentsMargins(8, 8, 8, 6);
+        root->setSpacing(6);
+        root->addWidget(buildCommandBar());
 
         auto* splitter = new QSplitter(Qt::Horizontal);
-        splitter->addWidget(buildBreakpointPane());
-        splitter->addWidget(buildHitDetailPane());
-        splitter->setSizes({430, 930});
+        splitter->addWidget(buildHitStreamPane());
+        splitter->addWidget(buildRegisterInspector());
+        splitter->setSizes({470, 890});
         splitter->setStretchFactor(0, 0);
         splitter->setStretchFactor(1, 1);
         root->addWidget(splitter, 1);
@@ -480,109 +483,103 @@ private:
         applyStyle();
     }
 
-    QWidget* buildConnectionBar() {
+    QWidget* buildCommandBar() {
         auto* frame = new QFrame;
-        frame->setObjectName("connectionBar");
-        auto* layout = new QHBoxLayout(frame);
-        layout->setContentsMargins(12, 9, 12, 9);
-        layout->setSpacing(10);
+        frame->setObjectName("commandBar");
+        auto* layout = new QVBoxLayout(frame);
+        layout->setContentsMargins(8, 6, 8, 6);
+        layout->setSpacing(5);
+
+        auto* controls = new QHBoxLayout;
+        controls->setContentsMargins(0, 0, 0, 0);
+        controls->setSpacing(7);
 
         endpointEdit_ = new QLineEdit(qstr(state_.endpoint));
         targetEdit_ = new QLineEdit(qstr(state_.target));
         endpointEdit_->setPlaceholderText("手机 IP");
         targetEdit_->setPlaceholderText("包名或 PID");
-        endpointEdit_->setMinimumWidth(150);
-        targetEdit_->setMinimumWidth(240);
+        endpointEdit_->setMinimumWidth(132);
+        endpointEdit_->setMaximumWidth(170);
+        targetEdit_->setMinimumWidth(190);
+        targetEdit_->setMaximumWidth(280);
+
+        addressEdit_ = new QLineEdit;
+        addressEdit_->setPlaceholderText("绝对地址或 libtersafe.so+0x488F08");
+        addressEdit_->setMinimumWidth(260);
+
+        typeCombo_ = new QComboBox;
+        typeCombo_->addItems({"x", "r", "w", "rw"});
+        typeCombo_->setMaximumWidth(58);
+        sizeSpin_ = new QSpinBox;
+        sizeSpin_->setRange(1, 8);
+        sizeSpin_->setValue(4);
+        sizeSpin_->setMaximumWidth(58);
+        slotSpin_ = new QSpinBox;
+        slotSpin_->setRange(0, 3);
+        slotSpin_->setMaximumWidth(58);
 
         auto* connectButton = actionButton("连接", "primaryButton");
         auto* disconnectButton = actionButton("断开", "secondaryButton");
-        auto* probeButton = actionButton("检测驱动", "secondaryButton");
+        auto* probeButton = actionButton("检测", "secondaryButton");
+        auto* setButton = actionButton("下断", "primaryButton");
+        auto* removeButton = actionButton("删断", "dangerButton");
+        auto* infoButton = actionButton("刷新", "secondaryButton");
 
-        layout->addWidget(fieldLabel("Agent"));
-        layout->addWidget(endpointEdit_);
-        layout->addWidget(fieldLabel("目标"));
-        layout->addWidget(targetEdit_, 1);
-        layout->addStretch(1);
-        layout->addWidget(connectButton);
-        layout->addWidget(disconnectButton);
-        layout->addWidget(probeButton);
+        controls->addWidget(fieldLabel("Agent"));
+        controls->addWidget(endpointEdit_);
+        controls->addWidget(fieldLabel("目标"));
+        controls->addWidget(targetEdit_);
+        controls->addWidget(fieldLabel("断点"));
+        controls->addWidget(addressEdit_, 1);
+        controls->addWidget(fieldLabel("类型"));
+        controls->addWidget(typeCombo_);
+        controls->addWidget(fieldLabel("长度"));
+        controls->addWidget(sizeSpin_);
+        controls->addWidget(fieldLabel("槽"));
+        controls->addWidget(slotSpin_);
+        controls->addWidget(connectButton);
+        controls->addWidget(disconnectButton);
+        controls->addWidget(probeButton);
+        controls->addWidget(setButton);
+        controls->addWidget(removeButton);
+        controls->addWidget(infoButton);
+
+        auto* status = new QHBoxLayout;
+        status->setContentsMargins(0, 0, 0, 0);
+        status->setSpacing(14);
+        connectionLabel_ = new QLabel;
+        driverLabel_ = new QLabel;
+        errorLabel_ = new QLabel;
+        connectionLabel_->setObjectName("statusText");
+        driverLabel_->setObjectName("statusText");
+        errorLabel_->setObjectName("statusText");
+        status->addWidget(connectionLabel_);
+        status->addWidget(driverLabel_, 1);
+        status->addWidget(errorLabel_, 1);
+
+        layout->addLayout(controls);
+        layout->addLayout(status);
 
         connect(connectButton, &QPushButton::clicked, this, [this] { markConnected(); });
         connect(probeButton, &QPushButton::clicked, this, [this] { markConnected(); });
         connect(disconnectButton, &QPushButton::clicked, this, [this] { disconnectAgent(); });
-        return frame;
-    }
-
-    QWidget* buildBreakpointEditor() {
-        auto* frame = new QFrame;
-        frame->setObjectName("breakpointEditor");
-        auto* layout = new QHBoxLayout(frame);
-        layout->setContentsMargins(12, 9, 12, 9);
-        layout->setSpacing(10);
-
-        addressEdit_ = new QLineEdit;
-        addressEdit_->setPlaceholderText("绝对地址或 libtersafe.so+0x488F08");
-        addressEdit_->setMinimumWidth(330);
-
-        typeCombo_ = new QComboBox;
-        typeCombo_->addItems({"x", "r", "w", "rw"});
-        typeCombo_->setMaximumWidth(78);
-        sizeSpin_ = new QSpinBox;
-        sizeSpin_->setRange(1, 8);
-        sizeSpin_->setValue(4);
-        sizeSpin_->setMaximumWidth(76);
-        slotSpin_ = new QSpinBox;
-        slotSpin_->setRange(0, 3);
-        slotSpin_->setMaximumWidth(76);
-
-        auto* setButton = actionButton("下断", "primaryButton");
-        auto* removeButton = actionButton("删断", "dangerButton");
-        auto* infoButton = actionButton("刷新断点", "secondaryButton");
-
-        layout->addWidget(fieldLabel("断点"));
-        layout->addWidget(addressEdit_, 1);
-        layout->addWidget(fieldLabel("类型"));
-        layout->addWidget(typeCombo_);
-        layout->addWidget(fieldLabel("长度"));
-        layout->addWidget(sizeSpin_);
-        layout->addWidget(fieldLabel("槽"));
-        layout->addWidget(slotSpin_);
-        layout->addWidget(setButton);
-        layout->addWidget(removeButton);
-        layout->addWidget(infoButton);
-
         connect(setButton, &QPushButton::clicked, this, [this] { setBreakpoint(); });
         connect(removeButton, &QPushButton::clicked, this, [this] { removeBreakpoint(); });
         connect(infoButton, &QPushButton::clicked, this, [this] { queryBreakpointInfo(); });
         return frame;
     }
 
-    QWidget* buildStatusStrip() {
+    QWidget* buildHitStreamPane() {
         auto* frame = new QFrame;
-        frame->setObjectName("sessionbar");
-        auto* layout = new QHBoxLayout(frame);
-        layout->setContentsMargins(10, 6, 10, 6);
-        layout->setSpacing(18);
+        frame->setObjectName("hitStreamPane");
+        frame->setMinimumWidth(420);
+        frame->setMaximumWidth(560);
+        auto* layout = new QVBoxLayout(frame);
+        layout->setContentsMargins(8, 8, 8, 8);
+        layout->setSpacing(7);
 
-        connectionLabel_ = statusPill();
-        driverLabel_ = statusPill();
-        errorLabel_ = statusPill();
-        layout->addWidget(connectionLabel_);
-        layout->addWidget(driverLabel_, 1);
-        layout->addWidget(errorLabel_, 1);
-        return frame;
-    }
-
-    QWidget* buildBreakpointPane() {
-        auto* box = new QGroupBox("断点列表 / 监视断点");
-        box->setMinimumWidth(390);
-        box->setMaximumWidth(520);
-        auto* layout = new QVBoxLayout(box);
-        layout->setContentsMargins(8, 10, 8, 8);
-        layout->setSpacing(8);
-
-        auto* hint = new QLabel("同一个列表管理硬件断点槽和命中监视，避免状态分散。");
-        hint->setObjectName("paneHint");
+        auto* title = new QLabel("断点 / 命中流");
+        title->setObjectName("paneTitle");
         breakpointsTable_ = new QTableWidget;
         setupTable(breakpointsTable_, {"槽", "类型", "模块/偏移", "实际地址", "状态"});
         breakpointsTable_->horizontalHeader()->setStretchLastSection(false);
@@ -599,14 +596,14 @@ private:
             }
         });
 
-        auto* hitsTitle = new QLabel("命中列表");
+        auto* hitsTitle = new QLabel("命中流");
         hitsTitle->setObjectName("paneHint");
         hitRecordsTable_ = new QTableWidget;
-        setupTable(hitRecordsTable_, {"#", "PC", "LR"});
+        hitRecordsTable_->setColumnCount(2);
+        setupTable(hitRecordsTable_, {"#", "命中"});
         hitRecordsTable_->horizontalHeader()->setStretchLastSection(true);
         hitRecordsTable_->horizontalHeader()->setSectionResizeMode(0, QHeaderView::ResizeToContents);
         hitRecordsTable_->horizontalHeader()->setSectionResizeMode(1, QHeaderView::Stretch);
-        hitRecordsTable_->horizontalHeader()->setSectionResizeMode(2, QHeaderView::Stretch);
         connect(hitRecordsTable_, &QTableWidget::itemSelectionChanged, this, [this] {
             const int row = hitRecordsTable_->currentRow();
             if (row >= 0) {
@@ -617,32 +614,36 @@ private:
             }
         });
 
-        layout->addWidget(hint);
+        layout->addWidget(title);
         layout->addWidget(breakpointsTable_, 1);
         layout->addWidget(hitsTitle);
-        layout->addWidget(hitRecordsTable_, 1);
-        return box;
+        layout->addWidget(hitRecordsTable_, 2);
+        return frame;
     }
 
-    QWidget* buildHitDetailPane() {
-        auto* box = new QGroupBox("命中详情");
-        auto* layout = new QVBoxLayout(box);
-        layout->setContentsMargins(8, 10, 8, 8);
-        layout->setSpacing(8);
+    QWidget* buildRegisterInspector() {
+        auto* frame = new QFrame;
+        frame->setObjectName("registerInspector");
+        auto* layout = new QVBoxLayout(frame);
+        layout->setContentsMargins(8, 8, 8, 8);
+        layout->setSpacing(7);
 
         emptyDataLabel_ = new QLabel("等待真实断点命中数据");
         emptyDataLabel_->setObjectName("emptyDataLabel");
         emptyDataLabel_->setAlignment(Qt::AlignCenter);
-        emptyDataLabel_->setMinimumHeight(38);
+        emptyDataLabel_->setMinimumHeight(30);
 
-        auto* copyBar = new QHBoxLayout;
-        copyBar->setContentsMargins(0, 0, 0, 0);
-        copyBar->setSpacing(6);
+        auto* titleBar = new QHBoxLayout;
+        titleBar->setContentsMargins(0, 0, 0, 0);
+        titleBar->setSpacing(6);
+        auto* title = new QLabel("寄存器");
+        title->setObjectName("paneTitle");
         auto* copyCurrentButton = actionButton("复制当前命中", "secondaryButton");
         auto* copyAllButton = actionButton("复制全部命中", "secondaryButton");
-        copyBar->addStretch(1);
-        copyBar->addWidget(copyCurrentButton);
-        copyBar->addWidget(copyAllButton);
+        titleBar->addWidget(title);
+        titleBar->addStretch(1);
+        titleBar->addWidget(copyCurrentButton);
+        titleBar->addWidget(copyAllButton);
         connect(copyCurrentButton, &QPushButton::clicked, this, [this] { copyCurrentHit(); });
         connect(copyAllButton, &QPushButton::clicked, this, [this] { copyAllHits(); });
 
@@ -657,12 +658,12 @@ private:
         infoText_->setFrameShape(QFrame::NoFrame);
         detailSplitter->addWidget(hitSnapshotText_);
         detailSplitter->addWidget(infoText_);
-        detailSplitter->setSizes({500, 150});
+        detailSplitter->setSizes({560, 120});
 
+        layout->addLayout(titleBar);
         layout->addWidget(emptyDataLabel_);
-        layout->addLayout(copyBar);
         layout->addWidget(detailSplitter, 1);
-        return box;
+        return frame;
     }
 
     bool applyInputs(bool requireAddress) {
@@ -956,19 +957,10 @@ private:
 
     void refreshUi() {
         connectionLabel_->setText(state_.connected ? "Agent 在线" : "Agent 未连接");
-        connectionLabel_->setProperty("state", state_.connected ? "ok" : "bad");
         driverLabel_->setText("驱动: " + QString(state_.driver.moduleLoaded ? "已加载" : "未加载")
             + "  /proc/modules: " + QString(state_.driver.procModulesReadable ? "可读" : "未确认")
             + "  协议: " + qstr(std::string(xc::kProtocolName)) + " v" + QString::number(xc::kProtocolVersion));
-        driverLabel_->setProperty("state", state_.driver.moduleLoaded ? "ok" : "warn");
         errorLabel_->setText(state_.lastError.empty() ? "错误: 无" : "错误: " + qstr(state_.lastError));
-        errorLabel_->setProperty("state", state_.lastError.empty() ? "ok" : "bad");
-        connectionLabel_->style()->unpolish(connectionLabel_);
-        connectionLabel_->style()->polish(connectionLabel_);
-        driverLabel_->style()->unpolish(driverLabel_);
-        driverLabel_->style()->polish(driverLabel_);
-        errorLabel_->style()->unpolish(errorLabel_);
-        errorLabel_->style()->polish(errorLabel_);
 
         refreshBreakpointsTable();
         refreshHitRecordsTable();
@@ -1023,14 +1015,11 @@ private:
         const AddressResolverContext context = resolverContext();
         hitRecordsTable_->setRowCount(static_cast<int>(state_.hitRecords.records.size()));
         for (int row = 0; row < static_cast<int>(state_.hitRecords.records.size()); ++row) {
-            const auto& hit = state_.hitRecords.records[static_cast<std::size_t>(row)];
             hitRecordsTable_->setItem(row, 0, cell(QString("#%1").arg(xc::visibleHitNumber(state_.hitRecords, static_cast<std::size_t>(row)))));
-            hitRecordsTable_->setItem(row, 1, cell(qstr(resolveAddressLabel(hit.pc, context))));
-            hitRecordsTable_->setItem(row, 2, cell(qstr(resolveAddressLabel(hit.lr, context))));
+            hitRecordsTable_->setItem(row, 1, cell(qstr(hitSummaryLine(state_.hitRecords, static_cast<std::size_t>(row), context))));
         }
         hitRecordsTable_->resizeColumnsToContents();
         hitRecordsTable_->horizontalHeader()->setSectionResizeMode(1, QHeaderView::Stretch);
-        hitRecordsTable_->horizontalHeader()->setSectionResizeMode(2, QHeaderView::Stretch);
         const int selectedRow = static_cast<int>(selectedHitIndex_ < state_.hitRecords.records.size() ? selectedHitIndex_ : state_.hitRecords.records.size() - 1);
         if (hitRecordsTable_->currentRow() != selectedRow) {
             hitRecordsTable_->selectRow(selectedRow);
@@ -1055,38 +1044,32 @@ private:
 
     void applyStyle() {
         setStyleSheet(R"(
-            QWidget { background: #101318; color: #dce3ec; font-family: "Microsoft YaHei UI"; font-size: 12px; }
-            QFrame#connectionBar, QFrame#breakpointEditor, QFrame#sessionbar, QStatusBar { background: #171c23; border: 1px solid #2c3541; border-radius: 6px; }
-            QFrame#breakpointEditor { background: #141922; }
-            QStatusBar { color: #aeb8c5; }
-            QGroupBox { border: 1px solid #2f3946; border-radius: 6px; margin-top: 20px; padding: 10px; background: #151a21; font-weight: 600; }
-            QGroupBox::title { subcontrol-origin: margin; left: 12px; padding: 0 6px; color: #f1f5f9; }
-            QLabel#fieldLabel { color: #91a0b4; font-weight: 600; }
-            QLabel#paneHint { color: #94a3b8; }
-            QLineEdit, QComboBox, QSpinBox, QPlainTextEdit, QTableWidget { background: #0b0f14; border: 1px solid #303a47; border-radius: 5px; color: #e7edf5; selection-background-color: #256d9f; selection-color: #ffffff; }
-            QLineEdit:focus, QComboBox:focus, QSpinBox:focus { border: 1px solid #4f8fc9; }
-            QLineEdit, QComboBox, QSpinBox { min-height: 28px; padding: 2px 8px; }
-            QPushButton { background: #222b36; border: 1px solid #3b4858; border-radius: 5px; color: #eef4fb; min-height: 29px; padding: 3px 12px; font-weight: 600; }
-            QPushButton:hover { background: #2b3644; border-color: #53657a; }
-            QPushButton:pressed { background: #1d2733; }
+            QWidget { background: #0f1115; color: #d7dde6; font-family: "Microsoft YaHei UI"; font-size: 11px; }
+            QFrame#commandBar, QFrame#hitStreamPane, QFrame#registerInspector, QStatusBar { background: #151922; border: 1px solid #2b313b; border-radius: 2px; }
+            QStatusBar { color: #9aa6b5; }
+            QLabel#fieldLabel { color: #8894a5; font-weight: 600; }
+            QLabel#paneTitle { color: #f0f4f8; font-size: 12px; font-weight: 700; }
+            QLabel#paneHint, QLabel#statusText { color: #9aa6b5; }
+            QLineEdit, QComboBox, QSpinBox, QPlainTextEdit, QTableWidget { background: #0b0d11; border: 1px solid #2b313b; border-radius: 2px; color: #e4e9f0; selection-background-color: #225d80; selection-color: #ffffff; }
+            QLineEdit:focus, QComboBox:focus, QSpinBox:focus { border: 1px solid #4c8db8; }
+            QLineEdit, QComboBox, QSpinBox { min-height: 24px; padding: 1px 6px; }
+            QPushButton { background: #202733; border: 1px solid #384150; border-radius: 2px; color: #edf3fa; min-height: 24px; padding: 2px 9px; font-weight: 600; }
+            QPushButton:hover { background: #28313f; border-color: #506074; }
+            QPushButton:pressed { background: #1b222d; }
             QPushButton[role="primaryButton"] { background: #1f6f9f; border-color: #2f91c8; color: #ffffff; }
             QPushButton[role="primaryButton"]:hover { background: #247dac; }
-            QPushButton[role="secondaryButton"] { background: #202832; }
-            QPushButton[role="dangerButton"] { background: #40242a; border-color: #70404a; color: #ffd9df; }
-            QPushButton[role="dangerButton"]:hover { background: #573039; }
-            QLabel[role="statusPill"] { background: #10151c; border: 1px solid #344050; border-radius: 5px; min-height: 24px; padding: 2px 10px; font-weight: 600; }
-            QLabel[role="statusPill"][state="ok"] { color: #8ee6a8; border-color: #2d6d47; background: #112019; }
-            QLabel[role="statusPill"][state="warn"] { color: #ffd166; border-color: #80652a; background: #211c10; }
-            QLabel[role="statusPill"][state="bad"] { color: #ff9aa2; border-color: #7a3b44; background: #241419; }
-            QHeaderView::section { background: #202832; border: none; border-right: 1px solid #344050; color: #cdd7e3; padding: 7px 8px; font-weight: 600; }
-            QTableWidget { alternate-background-color: #0e1319; gridline-color: transparent; }
-            QTableWidget::item { padding: 2px 6px; border: none; }
-            QTableWidget::item:selected { background: #1f5f87; color: #ffffff; }
-            QPlainTextEdit { font-family: "Cascadia Mono", "Consolas"; font-size: 12px; line-height: 1.32; padding: 7px; }
-            QLabel#emptyDataLabel { background: #0b0f14; border: 1px dashed #3d4a5a; border-radius: 6px; color: #9ed2ff; font-size: 13px; font-weight: 600; }
-            QSplitter::handle { background: #202832; }
-            QSplitter::handle:horizontal { width: 5px; }
-            QSplitter::handle:vertical { height: 5px; }
+            QPushButton[role="secondaryButton"] { background: #1b212b; }
+            QPushButton[role="dangerButton"] { background: #3b2026; border-color: #70404a; color: #ffd9df; }
+            QPushButton[role="dangerButton"]:hover { background: #512b34; }
+            QHeaderView::section { background: #1a202a; border: none; border-right: 1px solid #2d3542; color: #c4ccd8; padding: 5px 6px; font-weight: 600; }
+            QTableWidget { alternate-background-color: #0f1319; gridline-color: transparent; }
+            QTableWidget::item { padding: 1px 6px; border: none; }
+            QTableWidget::item:selected { background: #1d577b; color: #ffffff; }
+            QPlainTextEdit { font-family: "Cascadia Mono", "Consolas"; font-size: 11px; line-height: 1.25; padding: 6px; }
+            QLabel#emptyDataLabel { background: #0b0d11; border: 1px solid #2b313b; border-radius: 2px; color: #9ed2ff; font-weight: 600; }
+            QSplitter::handle { background: #202733; }
+            QSplitter::handle:horizontal { width: 4px; }
+            QSplitter::handle:vertical { height: 4px; }
         )");
     }
 };
