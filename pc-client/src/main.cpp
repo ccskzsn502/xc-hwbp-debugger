@@ -424,7 +424,6 @@ private:
             }
         )"));
     }
-    }
 
     QTableWidget* slotsTable_ = nullptr;
     QTableWidget* breakpointsTable_ = nullptr;
