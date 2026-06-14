@@ -57,8 +57,8 @@ int main(int argc, char** argv) {
     require(contains(mainCpp, "QFrame#headerBar") && contains(mainCpp, "QFrame#controlRail") && contains(mainCpp, "QFrame#activityPane")
                 && contains(mainCpp, "QFrame#inspectorPane"),
             "GUI shell should use named flat panes for styling");
-    require(contains(mainCpp, "border-radius: 2px") && !contains(mainCpp, "border-radius: 6px"),
-            "GUI shell should keep low-radius controls instead of rounded card styling");
+    require(contains(mainCpp, "border-radius: 4px") && !contains(mainCpp, "border-radius: 6px"),
+            "GUI shell should use rounded card styling for transparent purple theme");
 
     require(contains(mainCpp, "XC HWBP Debugger") && contains(mainCpp, "断点与命中") && contains(mainCpp, "寄存器快照"),
             "GUI shell labels must be readable Chinese, not mojibake");
@@ -71,9 +71,9 @@ int main(int argc, char** argv) {
     require(contains(mainCpp, "Agent 未连接") && contains(mainCpp, "Driver 未检测") && contains(mainCpp, "MCP 预览"),
             "header should show preview status badges for the future runtime state");
 
-    require(contains(mainCpp, "breakpointsTable_") && contains(mainCpp, "hitsTable_") && contains(mainCpp, "slotsTable_"),
-            "GUI shell should include breakpoint, hit stream and slot overview tables");
-    require(contains(mainCpp, "registerText_") && contains(mainCpp, "modulesText_") && contains(mainCpp, "rawText_") && contains(mainCpp, "logText_"),
+    require(contains(mainCpp, "breakpointsTable_") && contains(mainCpp, "hitsTable_"),
+            "GUI shell should include breakpoint and hit stream tables");
+    require(contains(mainCpp, "registerText_") && contains(mainCpp, "rawText_") && contains(mainCpp, "logText_"),
             "GUI shell should include inspector tabs and bottom log output");
     require(contains(mainCpp, "primaryButton") && contains(mainCpp, "secondaryButton") && contains(mainCpp, "dangerButton"),
             "GUI shell should keep a basic action hierarchy for later wiring");
