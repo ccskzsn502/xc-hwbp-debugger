@@ -461,20 +461,22 @@ private:
     QPushButton* actionButton(const QString& text, const char* role) {
         auto* button = new QPushButton(text);
         button->setProperty("role", role);
+        button->setMinimumWidth(56);
+        button->setMaximumHeight(28);
         return button;
     }
 
     void buildUi() {
         auto* central = new QWidget;
         auto* root = new QVBoxLayout(central);
-        root->setContentsMargins(8, 8, 8, 6);
-        root->setSpacing(6);
+        root->setContentsMargins(10, 10, 10, 8);
+        root->setSpacing(8);
         root->addWidget(buildCommandBar());
 
         auto* splitter = new QSplitter(Qt::Horizontal);
         splitter->addWidget(buildHitStreamPane());
         splitter->addWidget(buildRegisterInspector());
-        splitter->setSizes({470, 890});
+        splitter->setSizes({440, 920});
         splitter->setStretchFactor(0, 0);
         splitter->setStretchFactor(1, 1);
         root->addWidget(splitter, 1);
@@ -487,35 +489,38 @@ private:
         auto* frame = new QFrame;
         frame->setObjectName("commandBar");
         auto* layout = new QVBoxLayout(frame);
-        layout->setContentsMargins(8, 6, 8, 6);
-        layout->setSpacing(5);
+        layout->setContentsMargins(10, 8, 10, 8);
+        layout->setSpacing(7);
 
         auto* controls = new QHBoxLayout;
         controls->setContentsMargins(0, 0, 0, 0);
-        controls->setSpacing(7);
+        controls->setSpacing(6);
 
         endpointEdit_ = new QLineEdit(qstr(state_.endpoint));
         targetEdit_ = new QLineEdit(qstr(state_.target));
         endpointEdit_->setPlaceholderText("手机 IP");
         targetEdit_->setPlaceholderText("包名或 PID");
-        endpointEdit_->setMinimumWidth(132);
-        endpointEdit_->setMaximumWidth(170);
-        targetEdit_->setMinimumWidth(190);
-        targetEdit_->setMaximumWidth(280);
+        endpointEdit_->setMinimumWidth(128);
+        endpointEdit_->setMaximumWidth(156);
+        targetEdit_->setMinimumWidth(188);
+        targetEdit_->setMaximumWidth(260);
 
         addressEdit_ = new QLineEdit;
         addressEdit_->setPlaceholderText("绝对地址或 libtersafe.so+0x488F08");
-        addressEdit_->setMinimumWidth(260);
+        addressEdit_->setMinimumWidth(300);
 
         typeCombo_ = new QComboBox;
         typeCombo_->addItems({"x", "r", "w", "rw"});
+        typeCombo_->setMinimumWidth(52);
         typeCombo_->setMaximumWidth(58);
         sizeSpin_ = new QSpinBox;
         sizeSpin_->setRange(1, 8);
         sizeSpin_->setValue(4);
+        sizeSpin_->setMinimumWidth(52);
         sizeSpin_->setMaximumWidth(58);
         slotSpin_ = new QSpinBox;
         slotSpin_->setRange(0, 3);
+        slotSpin_->setMinimumWidth(52);
         slotSpin_->setMaximumWidth(58);
 
         auto* connectButton = actionButton("连接", "primaryButton");
@@ -546,13 +551,16 @@ private:
 
         auto* status = new QHBoxLayout;
         status->setContentsMargins(0, 0, 0, 0);
-        status->setSpacing(14);
+        status->setSpacing(16);
         connectionLabel_ = new QLabel;
         driverLabel_ = new QLabel;
         errorLabel_ = new QLabel;
         connectionLabel_->setObjectName("statusText");
         driverLabel_->setObjectName("statusText");
         errorLabel_->setObjectName("statusText");
+        connectionLabel_->setMinimumWidth(84);
+        driverLabel_->setTextInteractionFlags(Qt::TextSelectableByMouse);
+        errorLabel_->setTextInteractionFlags(Qt::TextSelectableByMouse);
         status->addWidget(connectionLabel_);
         status->addWidget(driverLabel_, 1);
         status->addWidget(errorLabel_, 1);
@@ -572,11 +580,11 @@ private:
     QWidget* buildHitStreamPane() {
         auto* frame = new QFrame;
         frame->setObjectName("hitStreamPane");
-        frame->setMinimumWidth(420);
-        frame->setMaximumWidth(560);
+        frame->setMinimumWidth(390);
+        frame->setMaximumWidth(540);
         auto* layout = new QVBoxLayout(frame);
-        layout->setContentsMargins(8, 8, 8, 8);
-        layout->setSpacing(7);
+        layout->setContentsMargins(10, 10, 10, 10);
+        layout->setSpacing(8);
 
         auto* title = new QLabel("断点 / 命中流");
         title->setObjectName("paneTitle");
@@ -625,8 +633,8 @@ private:
         auto* frame = new QFrame;
         frame->setObjectName("registerInspector");
         auto* layout = new QVBoxLayout(frame);
-        layout->setContentsMargins(8, 8, 8, 8);
-        layout->setSpacing(7);
+        layout->setContentsMargins(10, 10, 10, 10);
+        layout->setSpacing(8);
 
         emptyDataLabel_ = new QLabel("等待真实断点命中数据");
         emptyDataLabel_->setObjectName("emptyDataLabel");
@@ -635,7 +643,7 @@ private:
 
         auto* titleBar = new QHBoxLayout;
         titleBar->setContentsMargins(0, 0, 0, 0);
-        titleBar->setSpacing(6);
+        titleBar->setSpacing(8);
         auto* title = new QLabel("寄存器");
         title->setObjectName("paneTitle");
         auto* copyCurrentButton = actionButton("复制当前命中", "secondaryButton");
@@ -1044,32 +1052,35 @@ private:
 
     void applyStyle() {
         setStyleSheet(R"(
-            QWidget { background: #0f1115; color: #d7dde6; font-family: "Microsoft YaHei UI"; font-size: 11px; }
-            QFrame#commandBar, QFrame#hitStreamPane, QFrame#registerInspector, QStatusBar { background: #151922; border: 1px solid #2b313b; border-radius: 2px; }
-            QStatusBar { color: #9aa6b5; }
-            QLabel#fieldLabel { color: #8894a5; font-weight: 600; }
-            QLabel#paneTitle { color: #f0f4f8; font-size: 12px; font-weight: 700; }
-            QLabel#paneHint, QLabel#statusText { color: #9aa6b5; }
-            QLineEdit, QComboBox, QSpinBox, QPlainTextEdit, QTableWidget { background: #0b0d11; border: 1px solid #2b313b; border-radius: 2px; color: #e4e9f0; selection-background-color: #225d80; selection-color: #ffffff; }
-            QLineEdit:focus, QComboBox:focus, QSpinBox:focus { border: 1px solid #4c8db8; }
-            QLineEdit, QComboBox, QSpinBox { min-height: 24px; padding: 1px 6px; }
-            QPushButton { background: #202733; border: 1px solid #384150; border-radius: 2px; color: #edf3fa; min-height: 24px; padding: 2px 9px; font-weight: 600; }
-            QPushButton:hover { background: #28313f; border-color: #506074; }
-            QPushButton:pressed { background: #1b222d; }
-            QPushButton[role="primaryButton"] { background: #1f6f9f; border-color: #2f91c8; color: #ffffff; }
-            QPushButton[role="primaryButton"]:hover { background: #247dac; }
-            QPushButton[role="secondaryButton"] { background: #1b212b; }
-            QPushButton[role="dangerButton"] { background: #3b2026; border-color: #70404a; color: #ffd9df; }
-            QPushButton[role="dangerButton"]:hover { background: #512b34; }
-            QHeaderView::section { background: #1a202a; border: none; border-right: 1px solid #2d3542; color: #c4ccd8; padding: 5px 6px; font-weight: 600; }
-            QTableWidget { alternate-background-color: #0f1319; gridline-color: transparent; }
-            QTableWidget::item { padding: 1px 6px; border: none; }
-            QTableWidget::item:selected { background: #1d577b; color: #ffffff; }
-            QPlainTextEdit { font-family: "Cascadia Mono", "Consolas"; font-size: 11px; line-height: 1.25; padding: 6px; }
-            QLabel#emptyDataLabel { background: #0b0d11; border: 1px solid #2b313b; border-radius: 2px; color: #9ed2ff; font-weight: 600; }
-            QSplitter::handle { background: #202733; }
-            QSplitter::handle:horizontal { width: 4px; }
-            QSplitter::handle:vertical { height: 4px; }
+            QWidget { background: #111318; color: #d9dee7; font-family: "Microsoft YaHei UI", "Microsoft YaHei"; font-size: 12px; }
+            QFrame#commandBar, QFrame#hitStreamPane, QFrame#registerInspector, QStatusBar { background: #181b21; border: 1px solid #303640; border-radius: 2px; }
+            QStatusBar { color: #9ca6b4; padding-left: 6px; }
+            QLabel#fieldLabel { color: #9aa4b2; font-size: 11px; font-weight: 600; }
+            QLabel#paneTitle { color: #eef2f7; font-size: 13px; font-weight: 700; }
+            QLabel#paneHint, QLabel#statusText { color: #a3adba; font-size: 11px; }
+            QLineEdit, QComboBox, QSpinBox, QPlainTextEdit, QTableWidget { background: #0d0f14; border: 1px solid #303640; border-radius: 2px; color: #e6ebf2; selection-background-color: #245b78; selection-color: #ffffff; }
+            QLineEdit:focus, QComboBox:focus, QSpinBox:focus { border: 1px solid #5d8fb0; }
+            QLineEdit, QComboBox, QSpinBox { min-height: 26px; max-height: 26px; padding: 1px 7px; }
+            QComboBox::drop-down { width: 16px; border: none; }
+            QSpinBox::up-button, QSpinBox::down-button { width: 14px; border: none; background: #171b22; }
+            QPushButton { background: #232a33; border: 1px solid #3a4350; border-radius: 2px; color: #f0f4f8; min-height: 26px; max-height: 26px; padding: 1px 10px; font-size: 12px; font-weight: 600; }
+            QPushButton:hover { background: #2a323d; border-color: #515d6d; }
+            QPushButton:pressed { background: #1c222b; }
+            QPushButton[role="primaryButton"] { background: #286f91; border-color: #3c8eb5; color: #ffffff; }
+            QPushButton[role="primaryButton"]:hover { background: #2f7fa4; }
+            QPushButton[role="secondaryButton"] { background: #20262f; }
+            QPushButton[role="dangerButton"] { background: #4a252b; border-color: #74414a; color: #ffe1e5; }
+            QPushButton[role="dangerButton"]:hover { background: #5a2c34; }
+            QHeaderView::section { background: #20262f; border: none; border-right: 1px solid #333b47; color: #cbd3df; padding: 6px 7px; font-size: 11px; font-weight: 600; }
+            QTableWidget { alternate-background-color: #11151b; gridline-color: transparent; outline: none; }
+            QTableWidget::item { padding: 3px 7px; border: none; }
+            QTableWidget::item:selected { background: #244f69; color: #ffffff; }
+            QPlainTextEdit { font-family: "Cascadia Mono", "Consolas"; font-size: 12px; line-height: 1.3; padding: 8px; }
+            QLabel#emptyDataLabel { background: #0d0f14; border: 1px solid #303640; border-radius: 2px; color: #9cc7e0; font-size: 12px; font-weight: 600; }
+            QSplitter::handle { background: #111318; }
+            QSplitter::handle:hover { background: #303640; }
+            QSplitter::handle:horizontal { width: 6px; }
+            QSplitter::handle:vertical { height: 6px; }
         )");
     }
 };
