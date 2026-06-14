@@ -148,7 +148,7 @@ private:
         layout->addLayout(connectRow);
 
         layout->addSpacing(10);
-        layout->addWidget(makeSectionTitle(QStringLiteral("断点编辑器")));
+        layout->addWidget(makeSectionTitle(QStringLiteral("断点编辑")));
         auto* address = new QLineEdit(QStringLiteral("libtersafe.so+0x488F08"));
         address->setPlaceholderText(QStringLiteral("module.so+offset 或 0xaddr"));
         layout->addWidget(address);
@@ -167,17 +167,6 @@ private:
         actionRow->addWidget(makeButton(QStringLiteral("清空"), "dangerButton"));
         layout->addLayout(actionRow);
 
-        layout->addSpacing(10);
-        layout->addWidget(makeSectionTitle(QStringLiteral("槽位概览")));
-        slotsTable_ = new QTableWidget;
-        setupTable(slotsTable_, {QStringLiteral("Slot"), QStringLiteral("状态"), QStringLiteral("类型")});
-        slotsTable_->setRowCount(4);
-        for (int row = 0; row < 4; ++row) {
-            slotsTable_->setItem(row, 0, item(QString::number(row)));
-            slotsTable_->setItem(row, 1, item(QStringLiteral("空闲"), QColor("#8291A8")));
-            slotsTable_->setItem(row, 2, item(QStringLiteral("-"), QColor("#8291A8")));
-        }
-        layout->addWidget(slotsTable_, 1);
         layout->addStretch();
 
         dock->setWidget(body);
@@ -206,7 +195,6 @@ private:
         titleRow->addWidget(makeLabel(QStringLiteral("断点与命中"), "workspaceTitle"));
         titleRow->addStretch();
         titleRow->addWidget(makeButton(QStringLiteral("刷新"), "secondaryButton"));
-        titleRow->addWidget(makeButton(QStringLiteral("导出"), "secondaryButton"));
         layout->addLayout(titleRow);
 
         breakpointsTable_ = new QTableWidget;
@@ -255,17 +243,6 @@ private:
         registerLayout->addWidget(registerText_);
         tabs->addTab(registers, QStringLiteral("寄存器"));
 
-        auto* modules = makePane("modulesPane");
-        auto* moduleLayout = paneLayout(modules);
-        modulesText_ = new QPlainTextEdit;
-        modulesText_->setReadOnly(true);
-        modulesText_->setPlainText(QStringLiteral(
-            "模块列表\n\n"
-            "等待 Agent maps 数据。\n"
-            "这里会显示 so 基址、大小和权限。"));
-        moduleLayout->addWidget(modulesText_);
-        tabs->addTab(modules, QStringLiteral("模块"));
-
         auto* raw = makePane("rawPane");
         auto* rawLayout = paneLayout(raw);
         rawText_ = new QPlainTextEdit;
@@ -303,52 +280,52 @@ private:
         qApp->setFont(QFont(QStringLiteral("Microsoft YaHei UI"), 9));
         setStyleSheet(QStringLiteral(R"(
             QMainWindow {
-                background: #0B1018;
-                color: #D7DEE9;
+                background: #120E1A;
+                color: #D8C8E8;
             }
             QFrame#headerBar {
-                background: #111823;
-                border-bottom: 1px solid #223044;
+                background: rgba(30, 20, 50, 180);
+                border-bottom: 1px solid rgba(140, 80, 200, 100);
             }
             QLabel#appTitle {
-                color: #F4F7FB;
+                color: #E8D0F8;
                 font-size: 19px;
                 font-weight: 700;
             }
             QLabel#appSubtitle {
-                color: #8291A8;
+                color: #9A80A8;
                 font-size: 12px;
             }
             QLabel[statusBadge="true"] {
                 padding: 4px 10px;
-                border: 1px solid #2E3D54;
-                border-radius: 2px;
-                color: #C7D1E0;
-                background: #151F2D;
+                border: 1px solid rgba(140, 80, 200, 80);
+                border-radius: 4px;
+                color: #D0B8E0;
+                background: rgba(80, 40, 120, 100);
             }
             QLabel#offlineBadge {
                 color: #FFB4A8;
-                border-color: #6D332E;
-                background: #241717;
+                border-color: rgba(200, 80, 80, 100);
+                background: rgba(120, 40, 40, 100);
             }
             QLabel#idleBadge {
                 color: #FFDDA0;
-                border-color: #685025;
-                background: #211B10;
+                border-color: rgba(200, 160, 60, 100);
+                background: rgba(120, 90, 30, 100);
             }
             QLabel#mcpBadge {
-                color: #9EE8C3;
-                border-color: #28664A;
-                background: #102018;
+                color: #B8E8C3;
+                border-color: rgba(80, 180, 120, 100);
+                background: rgba(40, 100, 60, 100);
             }
             QDockWidget {
-                color: #C8D2E1;
+                color: #D0B8E0;
                 titlebar-close-icon: none;
                 titlebar-normal-icon: none;
             }
             QDockWidget::title {
-                background: #111823;
-                border: 1px solid #223044;
+                background: rgba(25, 18, 40, 200);
+                border: 1px solid rgba(140, 80, 200, 80);
                 padding: 7px 10px;
                 text-align: left;
             }
@@ -357,12 +334,12 @@ private:
             QFrame#inspectorPane,
             QFrame#modulesPane,
             QFrame#rawPane {
-                background: #0F1622;
-                border: 1px solid #223044;
+                background: rgba(20, 15, 30, 180);
+                border: 1px solid rgba(140, 80, 200, 80);
             }
             QLabel#sectionTitle,
             QLabel#workspaceTitle {
-                color: #F4F7FB;
+                color: #E0C8F0;
                 font-weight: 700;
                 font-size: 13px;
             }
@@ -372,84 +349,87 @@ private:
             QLineEdit {
                 min-height: 30px;
                 padding: 3px 8px;
-                color: #E7EDF6;
-                background: #0B1018;
-                border: 1px solid #2A3A50;
-                border-radius: 2px;
-                selection-background-color: #315D9C;
+                color: #D8C8E8;
+                background: rgba(15, 10, 25, 180);
+                border: 1px solid rgba(140, 80, 200, 80);
+                border-radius: 4px;
+                selection-background-color: rgba(120, 60, 180, 180);
             }
             QPushButton,
             QToolButton {
                 padding: 5px 10px;
-                border-radius: 2px;
-                border: 1px solid #33465F;
-                background: #182335;
-                color: #D8E2EF;
+                border-radius: 4px;
+                border: 1px solid rgba(140, 80, 200, 80);
+                background: rgba(40, 25, 60, 180);
+                color: #D0B8E0;
                 font-weight: 600;
             }
             QPushButton#primaryButton,
             QToolButton:checked {
-                background: #1F5C96;
-                border-color: #2F75B6;
-                color: #F3F8FF;
+                background: rgba(100, 50, 160, 200);
+                border-color: rgba(140, 80, 200, 140);
+                color: #F0E0F8;
             }
             QPushButton#secondaryButton {
-                background: #121B29;
+                background: rgba(30, 20, 45, 160);
             }
             QPushButton#dangerButton {
-                color: #FFC6C0;
-                background: #2A1718;
-                border-color: #6D3330;
+                color: #FFB4A8;
+                background: rgba(100, 30, 30, 140);
+                border-color: rgba(200, 80, 80, 100);
             }
             QTableWidget {
-                background: #0B1018;
-                alternate-background-color: #0F1724;
-                color: #DCE5F1;
-                border: 1px solid #223044;
-                gridline-color: transparent;
-                selection-background-color: #21466F;
-                selection-color: #FFFFFF;
+                background: rgba(15, 10, 25, 180);
+                alternate-background-color: rgba(25, 18, 40, 160);
+                color: #D0B8E0;
+                border: 1px solid rgba(140, 80, 200, 80);
+                gridline-color: rgba(140, 80, 200, 40);
+                selection-background-color: rgba(120, 60, 180, 160);
+                selection-color: #F0E0F8;
             }
             QHeaderView::section {
-                background: #151F2D;
-                color: #9FB0C7;
+                background: rgba(30, 20, 50, 180);
+                color: #B098C8;
                 border: 0;
-                border-bottom: 1px solid #26364A;
+                border-bottom: 1px solid rgba(140, 80, 200, 100);
                 padding: 7px 8px;
                 font-weight: 700;
             }
             QPlainTextEdit {
-                background: #0B1018;
-                color: #DCE5F1;
-                border: 1px solid #223044;
-                border-radius: 2px;
+                background: rgba(18, 12, 30, 180);
+                border: 1px solid rgba(140, 80, 200, 80);
+                color: #D0B8E0;
+                border-radius: 4px;
                 padding: 10px;
-                selection-background-color: #315D9C;
+                selection-background-color: rgba(120, 60, 180, 180);
                 font-family: Consolas, "Cascadia Mono", monospace;
                 font-size: 12px;
             }
             QTabWidget::pane {
-                border: 0;
+                border: 1px solid rgba(140, 80, 200, 80);
+                border-radius: 4px;
+                background: rgba(20, 15, 30, 160);
             }
             QTabBar::tab {
-                background: #121B29;
-                color: #9FB0C7;
-                border: 1px solid #223044;
+                background: rgba(30, 20, 50, 160);
+                color: #B098C8;
+                border: 1px solid rgba(140, 80, 200, 60);
                 padding: 7px 12px;
                 margin-right: 2px;
+                border-radius: 4px 4px 0 0;
             }
             QTabBar::tab:selected {
-                background: #1A2638;
-                color: #F4F7FB;
+                background: rgba(40, 25, 65, 180);
+                color: #E0C8F0;
             }
         )"));
+    }
     }
 
     QTableWidget* slotsTable_ = nullptr;
     QTableWidget* breakpointsTable_ = nullptr;
     QTableWidget* hitsTable_ = nullptr;
     QPlainTextEdit* registerText_ = nullptr;
-    QPlainTextEdit* modulesText_ = nullptr;
     QPlainTextEdit* rawText_ = nullptr;
     QPlainTextEdit* logText_ = nullptr;
     QTcpServer mcpPreviewServer_;
