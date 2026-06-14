@@ -29,39 +29,6 @@ bool contains(const std::string& haystack, const std::string& needle) {
     return haystack.find(needle) != std::string::npos;
 }
 
-std::size_t countOccurrences(const std::string& haystack, const std::string& needle) {
-    std::size_t count = 0;
-    std::size_t pos = 0;
-    while ((pos = haystack.find(needle, pos)) != std::string::npos) {
-        ++count;
-        pos += needle.size();
-    }
-    return count;
-}
-
-std::string methodBody(const std::string& source, const std::string& signature) {
-    const std::size_t signaturePos = source.find(signature);
-    const std::string missing = "missing method " + signature;
-    require(signaturePos != std::string::npos, missing.c_str());
-    const std::size_t openBrace = source.find('{', signaturePos);
-    const std::string missingBody = "missing method body for " + signature;
-    require(openBrace != std::string::npos, missingBody.c_str());
-    int depth = 0;
-    for (std::size_t i = openBrace; i < source.size(); ++i) {
-        if (source[i] == '{') {
-            ++depth;
-        } else if (source[i] == '}') {
-            --depth;
-            if (depth == 0) {
-                return source.substr(openBrace, i - openBrace + 1);
-            }
-        }
-    }
-    const std::string unterminated = "unterminated method body for " + signature;
-    require(false, unterminated.c_str());
-    return {};
-}
-
 } // namespace
 
 int main(int argc, char** argv) {
@@ -73,12 +40,6 @@ int main(int argc, char** argv) {
     const std::string readme = readFile(root / "README.md");
     const std::string workflow = readFile(root / ".github" / "workflows" / "build.yml");
 
-    require(!contains(mainCpp, "std::vector<std::string> registerLines()"),
-            "GUI must not ship with hard-coded mock register rows");
-    require(!contains(mainCpp, "00000078919CFF84") && !contains(mainCpp, "DEC:88"),
-            "initial GUI must not render fake register/address data before an agent hit");
-    require(contains(mainCpp, "等待真实断点命中数据"),
-            "empty data view should tell the user it is waiting for real breakpoint data");
     require(contains(mainCpp, "#include <QApplication>") && contains(mainCpp, "QMainWindow"),
             "PC GUI must be implemented with Qt Widgets");
     require(contains(editorconfig, "charset = utf-8"),
@@ -88,73 +49,45 @@ int main(int argc, char** argv) {
     require(contains(mainCpp, "Microsoft YaHei UI") || contains(mainCpp, "Microsoft YaHei"),
             "Qt GUI should explicitly use a clear Chinese Windows UI font");
 
-    require(contains(mainCpp, "QSplitter") && contains(mainCpp, "QTableWidget") && contains(mainCpp, "QPlainTextEdit"),
-            "Qt GUI should keep debugger-grade split panes and plain text inspection views");
-    require(contains(mainCpp, "buildCommandBar") && contains(mainCpp, "buildHitStreamPane") && contains(mainCpp, "buildRegisterInspector"),
-            "PC GUI should be redesigned around a single command bar, a hit stream, and a register inspector");
-    require(!contains(mainCpp, "buildConnectionBar") && !contains(mainCpp, "buildBreakpointEditor") && !contains(mainCpp, "statusPill"),
-            "redesigned UI must remove the old stacked toolbar/status-pill structure");
-    require(!contains(mainCpp, "#include <QGroupBox>") && !contains(mainCpp, "new QGroupBox"),
-            "redesigned UI must remove card-like QGroupBox panels");
-    require(contains(mainCpp, "QFrame#commandBar") && contains(mainCpp, "QFrame#hitStreamPane") && contains(mainCpp, "QFrame#registerInspector"),
-            "redesigned UI should use flat debugger panes with explicit object names");
+    require(contains(mainCpp, "class DebuggerShellWindow") && contains(mainCpp, "QDockWidget") && contains(mainCpp, "QTabWidget"),
+            "temporary GUI should be a dockable debugger workbench shell");
+    require(contains(mainCpp, "buildChrome") && contains(mainCpp, "buildLeftDock") && contains(mainCpp, "buildCenter")
+                && contains(mainCpp, "buildRightDock") && contains(mainCpp, "buildBottomDock"),
+            "GUI shell should separate header, left controls, center activity, right inspector and bottom output");
+    require(contains(mainCpp, "QFrame#headerBar") && contains(mainCpp, "QFrame#controlRail") && contains(mainCpp, "QFrame#activityPane")
+                && contains(mainCpp, "QFrame#inspectorPane"),
+            "GUI shell should use named flat panes for styling");
     require(contains(mainCpp, "border-radius: 2px") && !contains(mainCpp, "border-radius: 6px"),
-            "redesigned UI should use low-radius minimal controls instead of rounded card styling");
+            "GUI shell should keep low-radius controls instead of rounded card styling");
 
-    require(contains(mainCpp, "primaryButton") && contains(mainCpp, "dangerButton") && contains(mainCpp, "secondaryButton"),
-            "debugger actions should have primary, secondary and destructive visual hierarchy");
-    require(contains(mainCpp, "breakpointsTable_") && !contains(mainCpp, "watchTable_") && !contains(mainCpp, "slotsTable_"),
-            "watch breakpoints and breakpoint slots should be one linked breakpoint list, not two unrelated panes");
-    require(contains(mainCpp, "hitRecordsTable_") && contains(mainCpp, "refreshHitRecordsTable") && contains(mainCpp, "selectedHitIndex_"),
-            "PC GUI should show a selectable hit stream under the breakpoint list instead of only the latest hit");
-    require(contains(mainCpp, "setColumnCount(2)") && contains(mainCpp, "hitSummaryLine") && !contains(mainCpp, "setupTable(hitRecordsTable_, {\"#\", \"PC\", \"LR\"})"),
-            "hit stream should be log-like with fewer columns instead of another dense PC/LR grid");
-    require(!contains(mainCpp, "hitRecordsTable_->setItem(row, 0, cell(QString(\"#%1\").arg(hit.hitCount)))") && contains(mainCpp, "visibleHitNumber"),
-            "hit list must number visible rows from record_count/returned instead of repeating per-record hit_count");
-    require(contains(mainCpp, "copyCurrentHit") && contains(mainCpp, "copyAllHits") && contains(mainCpp, "QApplication::clipboard"),
-            "hit snapshot and hit list should have explicit copy actions");
-    require(contains(mainCpp, "setGridStyle(Qt::NoPen)") && contains(mainCpp, "setFrameShape(QFrame::NoFrame)"),
-            "debugger panes should use a more minimal visual style with fewer grid lines and frames");
-    require(contains(mainCpp, "itemSelectionChanged") && contains(mainCpp, "currentHitRecord"),
-            "selecting a hit row should switch the rendered register snapshot");
-    require(contains(mainCpp, "formatHitSnapshot") && contains(mainCpp, "X29") && !contains(mainCpp, "formatLatestHitStack"),
-            "registers and PC/LR/SP should render as one hit snapshot with one register per line, not split panes");
-    require(contains(mainCpp, "addressLine(\"X\" + std::to_string(i), hit->x[i], context)") && contains(mainCpp, "addressLine(\"X29\", hit->x[29], context)")
-                && !contains(mainCpp, "registerLine(\"X\" + std::to_string(i), hit->x[i])"),
-            "X registers should resolve through module maps so register values can show module+offset");
-    require(contains(mainCpp, "resolveAddressLabel") && contains(mainCpp, "AddressResolverContext"),
-            "address rendering should go through a resolver context that consumes agent maps");
-    require(contains(mainCpp, "resolveAddressWithModules") && !contains(mainCpp, "breakpoint.address - offset"),
-            "module+offset rendering must use agent-provided maps instead of deriving one breakpoint base on the PC");
-    require(contains(mainCpp, "hitSnapshotText_") && !contains(mainCpp, "stackText_") && !contains(mainCpp, "命中详情"),
-            "registers and stack should render in one combined inspector without the old titled card wording");
-    require(contains(mainCpp, "parseBreakpointAddress") && contains(mainCpp, "libtersafe.so+0x488F08"),
-            "breakpoint input should support module.so+offset syntax");
-    require(contains(mainCpp, "typeCombo_->addItems({\"x\", \"r\", \"w\", \"rw\"})") && contains(mainCpp, "protocolTypeForUi"),
-            "breakpoint type selector should use compact x/r/w/rw labels and map them to the wire protocol");
-    require(contains(mainCpp, "SocketHandle agentSocket_") && contains(mainCpp, "closeAgentSession"),
-            "GUI connection button should own a persistent Agent socket that disconnect closes explicitly");
-    require(contains(mainCpp, "sendAgentRequest") && contains(mainCpp, "ensureAgentSession"),
-            "GUI commands should reuse one Agent session through a shared request helper");
-    require(contains(mainCpp, "records.get") && contains(mainCpp, "parseRecordsGetResponse"),
-            "PC GUI must request and parse records.get so breakpoint hits appear instead of only raw breakpoint.info JSON");
-    require(contains(mainCpp, "refreshHitDetails") && contains(mainCpp, "hit #") && contains(mainCpp, "PC") && contains(mainCpp, "LR") && contains(mainCpp, "SP") && contains(mainCpp, "X29"),
-            "PC GUI must render the selected hit snapshot into the hit detail pane");
-    require(contains(mainCpp, "#include <QTimer>") && contains(mainCpp, "hitPollTimer_") && contains(mainCpp, "pollHitRecords"),
-            "PC GUI must poll records.get because the JSONL protocol has no async hit push from the phone");
-    require(contains(mainCpp, "queryHitRecords") && contains(methodBody(mainCpp, "void queryBreakpointInfo()"), "queryHitRecords"),
-            "manual breakpoint refresh must also fetch hit records for the selected slot");
-    require(!contains(methodBody(mainCpp, "void setBreakpoint()"), "openAgentSession")
-                && !contains(methodBody(mainCpp, "void removeBreakpoint()"), "openAgentSession")
-                && !contains(methodBody(mainCpp, "void queryBreakpointInfo()"), "openAgentSession"),
-            "breakpoint commands must not reconnect for every request");
-    require(countOccurrences(methodBody(mainCpp, "void markConnected()"), "closeSocket") == 0,
-            "successful connection probing must keep the Agent socket open after driver.status");
-    require(contains(mainCpp, "断点") && contains(mainCpp, "命中流") && contains(mainCpp, "寄存器"),
-            "redesigned Qt GUI labels must be readable Chinese, not mojibake");
+    require(contains(mainCpp, "XC HWBP Debugger") && contains(mainCpp, "断点与命中") && contains(mainCpp, "寄存器快照"),
+            "GUI shell labels must be readable Chinese, not mojibake");
+    require(contains(mainCpp, "会话") && contains(mainCpp, "检查器") && contains(mainCpp, "输出"),
+            "GUI shell should expose the main debugger workbench regions");
+    require(contains(mainCpp, "libtersafe.so+0x488F08") && contains(mainCpp, "module.so+offset 或 0xaddr"),
+            "breakpoint editor preview should show module+offset syntax");
+    require(contains(mainCpp, "等待真实断点命中数据") && contains(mainCpp, "按钮暂为界面预览"),
+            "temporary GUI must make clear that live debugger logic is not connected yet");
+    require(contains(mainCpp, "Agent 未连接") && contains(mainCpp, "Driver 未检测") && contains(mainCpp, "MCP 预览"),
+            "header should show preview status badges for the future runtime state");
 
-    require(contains(pcCMake, "find_package(Qt6") && contains(pcCMake, "Qt6::Widgets"),
-            "PC client CMake must build against Qt6 Widgets");
+    require(contains(mainCpp, "breakpointsTable_") && contains(mainCpp, "hitsTable_") && contains(mainCpp, "slotsTable_"),
+            "GUI shell should include breakpoint, hit stream and slot overview tables");
+    require(contains(mainCpp, "registerText_") && contains(mainCpp, "modulesText_") && contains(mainCpp, "rawText_") && contains(mainCpp, "logText_"),
+            "GUI shell should include inspector tabs and bottom log output");
+    require(contains(mainCpp, "primaryButton") && contains(mainCpp, "secondaryButton") && contains(mainCpp, "dangerButton"),
+            "GUI shell should keep a basic action hierarchy for later wiring");
+
+    require(!contains(mainCpp, "sendAgentRequest") && !contains(mainCpp, "ensureAgentSession") && !contains(mainCpp, "pollHitRecords")
+                && !contains(mainCpp, "setBreakpoint()") && !contains(mainCpp, "removeBreakpoint()"),
+            "temporary GUI shell should not include Agent or breakpoint protocol logic yet");
+    require(contains(mainCpp, "QTcpServer") && contains(mainCpp, "xc::mcp::serverName") && contains(mainCpp, "127.0.0.1:23947/mcp"),
+            "temporary GUI shell should keep MCP endpoint preview hooks without serving requests yet");
+
+    require(contains(pcCMake, "find_package(Qt6") && contains(pcCMake, "Qt6::Widgets") && contains(pcCMake, "Qt6::Network"),
+            "PC client CMake must build against Qt6 Widgets and keep Network available for later MCP wiring");
+    require(contains(pcCMake, "xc_mcp_core"),
+            "PC client should keep linking the MCP core while the shell UI is being reviewed");
     require(!contains(pcCMake, "EUI-NEO") && !contains(pcCMake, "eui_neo"),
             "PC client CMake must stop fetching EUI-NEO");
     require(contains(readme, "Qt Widgets") && contains(readme, "UTF-8") && !contains(readme, "EUI-NEO"),

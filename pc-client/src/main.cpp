@@ -1,406 +1,72 @@
-#ifdef _WIN32
-#ifndef WIN32_LEAN_AND_MEAN
-#define WIN32_LEAN_AND_MEAN
-#endif
-#ifndef NOMINMAX
-#define NOMINMAX
-#endif
-#include <winsock2.h>
-#include <ws2tcpip.h>
-#endif
-
 #include <QAbstractItemView>
 #include <QApplication>
-#include <QClipboard>
-#include <QComboBox>
+#include <QBrush>
+#include <QColor>
+#include <QDockWidget>
 #include <QFont>
 #include <QFrame>
-#include <QGuiApplication>
 #include <QHBoxLayout>
 #include <QHeaderView>
 #include <QHostAddress>
 #include <QLabel>
 #include <QLineEdit>
 #include <QMainWindow>
-#include <QNetworkInterface>
 #include <QPlainTextEdit>
 #include <QPushButton>
 #include <QTcpServer>
-#include <QTcpSocket>
-#include <QSpinBox>
-#include <QSplitter>
-#include <QStringList>
-#include <QStatusBar>
-#include <QStyle>
 #include <QTableWidget>
 #include <QTableWidgetItem>
-#include <QTimer>
+#include <QTabWidget>
+#include <QToolButton>
 #include <QVBoxLayout>
 #include <QWidget>
 
-#include <array>
-#include <cstdint>
-#include <sstream>
-#include <string>
-#include <vector>
-
-#ifndef _WIN32
-#include <arpa/inet.h>
-#include <netinet/in.h>
-#include <sys/socket.h>
-#include <unistd.h>
-#endif
-
-#include "xc/protocol.hpp"
 #include "xc/mcp_core.hpp"
 
 namespace {
 
-struct BreakpointAddressInput {
-    bool valid = false;
-    std::uint64_t address = 0;
-    std::string module;
-    std::uint64_t offset = 0;
-};
+constexpr const char* kMcpPreviewEndpoint = "http://127.0.0.1:23947/mcp";
 
-struct ClientState {
-    bool connected = false;
-    bool helloOk = false;
-    xc::HelloResponse hello;
-    std::string endpoint = "192.168.1.10";
-    std::string target = "com.tencent.tmgp.sgame";
-    BreakpointAddressInput breakpointInput;
-    std::string breakpointType = "execute";
-    std::uint32_t breakpointSize = 4;
-    xc::DriverStatusResponse driver;
-    xc::BreakpointSetResponse breakpoints[4];
-    std::string breakpointLabels[4];
-    std::string lastBreakpointInfo;
-    xc::RecordsGetResponse hitRecords;
-    std::size_t selectedHitIndex = 0;
-    std::string lastError = "未连接";
-    std::string lastAction = "就绪: 等待连接手机 Agent";
-    std::string mcpStatus = "MCP: 未启动";
-    std::uint64_t requestId = 1;
-};
-
-QString qstr(const std::string& value) {
-    return QString::fromUtf8(value.c_str());
+QString mcpPreviewResponse() {
+    return QString::fromStdString(xc::mcp::serverName()) + " preview only: " + QString::fromUtf8(kMcpPreviewEndpoint);
 }
 
-std::string stdstr(const QString& value) {
-    return value.toUtf8().constData();
-}
-
-std::string trimAscii(std::string value) {
-    while (!value.empty() && (value.front() == ' ' || value.front() == '\t')) {
-        value.erase(value.begin());
-    }
-    while (!value.empty() && (value.back() == ' ' || value.back() == '\t')) {
-        value.pop_back();
-    }
-    return value;
-}
-
-bool parseUnsigned64(const std::string& text, std::uint64_t& value) {
-    const std::string input = trimAscii(text);
-    if (input.empty()) {
-        return false;
-    }
-    int base = 10;
-    std::size_t i = 0;
-    if (input.size() > 2 && input[0] == '0' && (input[1] == 'x' || input[1] == 'X')) {
-        base = 16;
-        i = 2;
-    }
-    if (i >= input.size()) {
-        return false;
-    }
-    value = 0;
-    for (; i < input.size(); ++i) {
-        const char c = input[i];
-        unsigned digit = 0;
-        if (c >= '0' && c <= '9') {
-            digit = static_cast<unsigned>(c - '0');
-        } else if (base == 16 && c >= 'a' && c <= 'f') {
-            digit = static_cast<unsigned>(10 + c - 'a');
-        } else if (base == 16 && c >= 'A' && c <= 'F') {
-            digit = static_cast<unsigned>(10 + c - 'A');
-        } else {
-            return false;
-        }
-        if (digit >= static_cast<unsigned>(base)) {
-            return false;
-        }
-        value = value * static_cast<std::uint64_t>(base) + digit;
-    }
-    return true;
-}
-
-BreakpointAddressInput parseBreakpointAddress(const std::string& text) {
-    BreakpointAddressInput parsed;
-    const std::string input = trimAscii(text);
-    const std::size_t plus = input.find('+');
-    if (plus != std::string::npos) {
-        parsed.module = trimAscii(input.substr(0, plus));
-        if (parsed.module.empty() || !parseUnsigned64(input.substr(plus + 1), parsed.offset)) {
-            return parsed;
-        }
-        parsed.valid = true;
-        return parsed;
-    }
-    parsed.valid = parseUnsigned64(input, parsed.address) && parsed.address != 0;
-    return parsed;
-}
-
-std::string displayAddress(const BreakpointAddressInput& input) {
-    if (!input.module.empty()) {
-        return input.module + "+" + xc::hexAddress(input.offset);
-    }
-    return input.address == 0 ? "-" : xc::hexAddress(input.address);
-}
-
-struct AddressResolverContext {
-    std::vector<xc::ModuleMapEntry> modules;
-};
-
-std::string padLabel(std::string label) {
-    while (label.size() < 8) {
-        label.push_back(' ');
+QLabel* makeLabel(const QString& text, const QString& objectName = {}) {
+    auto* label = new QLabel(text);
+    if (!objectName.isEmpty()) {
+        label->setObjectName(objectName);
     }
     return label;
 }
 
-std::string resolveAddressLabel(std::uint64_t address, const AddressResolverContext& context) {
-    return xc::resolveAddressWithModules(address, context.modules);
+QFrame* makePane(const QString& objectName) {
+    auto* pane = new QFrame;
+    pane->setObjectName(objectName);
+    pane->setFrameShape(QFrame::NoFrame);
+    auto* layout = new QVBoxLayout(pane);
+    layout->setContentsMargins(16, 14, 16, 16);
+    layout->setSpacing(12);
+    return pane;
 }
 
-std::string registerLine(const std::string& name, std::uint64_t value) {
-    return padLabel(name) + xc::hexAddress(value);
+QVBoxLayout* paneLayout(QFrame* pane) {
+    return static_cast<QVBoxLayout*>(pane->layout());
 }
 
-std::string addressLine(const std::string& name, std::uint64_t value, const AddressResolverContext& context) {
-    return padLabel(name) + resolveAddressLabel(value, context);
+QPushButton* makeButton(const QString& text, const QString& objectName) {
+    auto* button = new QPushButton(text);
+    button->setObjectName(objectName);
+    button->setMinimumHeight(32);
+    return button;
 }
 
-std::string formatHitSnapshot(const xc::RecordsGetResponse& records, const xc::HitRecord* hit, const AddressResolverContext& context) {
-    if (!records.ok || hit == nullptr) {
-        return "命中快照\n\n等待真实断点命中数据。选择左侧命中列表后显示对应 PC/LR/SP 和寄存器。";
+QTableWidgetItem* item(const QString& text, const QColor& foreground = QColor()) {
+    auto* tableItem = new QTableWidgetItem(text);
+    tableItem->setFlags(Qt::ItemIsSelectable | Qt::ItemIsEnabled);
+    if (foreground.isValid()) {
+        tableItem->setForeground(QBrush(foreground));
     }
-
-    std::ostringstream out;
-    out << "命中快照\n\n";
-    std::size_t index = 0;
-    for (std::size_t i = 0; i < records.records.size(); ++i) {
-        if (&records.records[i] == hit) {
-            index = i;
-            break;
-        }
-    }
-    out << "slot " << records.slot << "   hit #" << xc::visibleHitNumber(records, index)
-        << "   raw_hit_count " << hit->hitCount << "\n";
-    out << addressLine("PC", hit->pc, context) << "\n";
-    out << addressLine("LR", hit->lr, context) << "\n";
-    out << addressLine("SP", hit->sp, context) << "\n\n";
-    out << registerLine("PSTATE", hit->pstate) << "\n";
-    out << registerLine("SYSCALL", hit->syscallno) << "\n";
-    out << padLabel("FPSR") << hit->fpsr << "\n";
-    out << padLabel("FPCR") << hit->fpcr << "\n\n";
-    for (int i = 0; i < 29; ++i) {
-        out << addressLine("X" + std::to_string(i), hit->x[i], context) << "\n";
-    }
-    out << addressLine("X29", hit->x[29], context) << "\n";
-    return out.str();
-}
-
-std::string formatHitListText(const xc::RecordsGetResponse& records, const AddressResolverContext& context) {
-    if (!records.ok) {
-        return "records.get failed: " + records.error;
-    }
-    if (records.records.empty()) {
-        return "no hit records";
-    }
-    std::ostringstream out;
-    out << "slot " << records.slot << " record_count " << records.recordCount << " returned " << records.returned << "\n";
-    for (std::size_t i = 0; i < records.records.size(); ++i) {
-        const auto& hit = records.records[i];
-        out << "#" << xc::visibleHitNumber(records, i)
-            << " PC " << resolveAddressLabel(hit.pc, context)
-            << " LR " << resolveAddressLabel(hit.lr, context)
-            << " SP " << resolveAddressLabel(hit.sp, context) << "\n";
-    }
-    return out.str();
-}
-
-std::string hitSummaryLine(const xc::RecordsGetResponse& records, std::size_t index, const AddressResolverContext& context) {
-    if (index >= records.records.size()) {
-        return {};
-    }
-    const auto& hit = records.records[index];
-    std::ostringstream out;
-    out << "PC " << resolveAddressLabel(hit.pc, context)
-        << "   LR " << resolveAddressLabel(hit.lr, context)
-        << "   SP " << resolveAddressLabel(hit.sp, context)
-        << "   raw " << hit.hitCount;
-    return out.str();
-}
-
-std::string protocolTypeForUi(const QString& value) {
-    const std::string text = stdstr(value).substr(0, 2);
-    if (text == "x") {
-        return "execute";
-    }
-    if (text == "r") {
-        return "read";
-    }
-    if (text == "w") {
-        return "write";
-    }
-    return "access";
-}
-
-QString typeLabel(const std::string& protocolType) {
-    if (protocolType == "execute") {
-        return "x 执行";
-    }
-    if (protocolType == "read") {
-        return "r 读取";
-    }
-    if (protocolType == "write") {
-        return "w 写入";
-    }
-    if (protocolType == "access") {
-        return "rw 读写";
-    }
-    return qstr(protocolType);
-}
-
-#ifdef _WIN32
-using SocketHandle = SOCKET;
-constexpr SocketHandle kInvalidSocket = INVALID_SOCKET;
-void closeSocket(SocketHandle socket) { closesocket(socket); }
-#else
-using SocketHandle = int;
-constexpr SocketHandle kInvalidSocket = -1;
-void closeSocket(SocketHandle socket) { ::close(socket); }
-#endif
-
-bool ensureSocketRuntime(std::string& error) {
-#ifdef _WIN32
-    static bool initialized = false;
-    if (!initialized) {
-        WSADATA data{};
-        if (WSAStartup(MAKEWORD(2, 2), &data) != 0) {
-            error = "WSAStartup 初始化失败";
-            return false;
-        }
-        initialized = true;
-    }
-#else
-    (void)error;
-#endif
-    return true;
-}
-
-bool sendAll(SocketHandle socket, const std::string& data) {
-    const char* ptr = data.data();
-    std::size_t remaining = data.size();
-    while (remaining > 0) {
-#ifdef _WIN32
-        const int sent = ::send(socket, ptr, static_cast<int>(remaining), 0);
-#else
-        const ssize_t sent = ::send(socket, ptr, remaining, 0);
-#endif
-        if (sent <= 0) {
-            return false;
-        }
-        ptr += sent;
-        remaining -= static_cast<std::size_t>(sent);
-    }
-    return true;
-}
-
-bool sendLine(SocketHandle socket, const std::string& line) {
-    return sendAll(socket, line + "\n");
-}
-
-std::string receiveLine(SocketHandle socket, std::string& error) {
-    std::string line;
-    std::array<char, 1> ch{};
-    while (line.size() < 64 * 1024) {
-#ifdef _WIN32
-        const int received = ::recv(socket, ch.data(), 1, 0);
-#else
-        const ssize_t received = ::recv(socket, ch.data(), 1, 0);
-#endif
-        if (received <= 0) {
-            error = line.empty() ? "连接已关闭，未收到响应" : "连接已关闭，响应不完整";
-            return {};
-        }
-        if (ch[0] == '\n') {
-            return line;
-        }
-        if (ch[0] != '\r') {
-            line.push_back(ch[0]);
-        }
-    }
-    error = "响应超过 64KB，协议异常";
-    return {};
-}
-
-SocketHandle connectSocket(const std::string& host, std::uint16_t port, std::string& error) {
-    if (!ensureSocketRuntime(error)) {
-        return kInvalidSocket;
-    }
-    const SocketHandle socketFd = ::socket(AF_INET, SOCK_STREAM, 0);
-    if (socketFd == kInvalidSocket) {
-        error = "创建 socket 失败";
-        return kInvalidSocket;
-    }
-    sockaddr_in address{};
-    address.sin_family = AF_INET;
-    address.sin_port = htons(port);
-    if (::inet_pton(AF_INET, host.c_str(), &address.sin_addr) != 1) {
-        error = "IP 地址格式无效: " + host;
-        closeSocket(socketFd);
-        return kInvalidSocket;
-    }
-    if (::connect(socketFd, reinterpret_cast<sockaddr*>(&address), sizeof(address)) != 0) {
-        error = "连接失败: " + host + ":" + std::to_string(port);
-        closeSocket(socketFd);
-        return kInvalidSocket;
-    }
-    return socketFd;
-}
-
-bool protocolOk(const xc::HelloResponse& hello) {
-    return hello.ok && hello.protocol == std::string(xc::kProtocolName) && hello.version == xc::kProtocolVersion;
-}
-
-bool openAgentSession(const std::string& endpoint, SocketHandle& socket, xc::HelloResponse& hello, std::string& error) {
-    socket = connectSocket(endpoint, xc::kDefaultAgentPort, error);
-    if (socket == kInvalidSocket) {
-        return false;
-    }
-    const std::string helloLine = receiveLine(socket, error);
-    hello = xc::parseHelloResponse(helloLine);
-    if (helloLine.empty() || !protocolOk(hello)) {
-        error = helloLine.empty() ? error : "Agent hello 不匹配: " + helloLine;
-        closeSocket(socket);
-        socket = kInvalidSocket;
-        return false;
-    }
-    return true;
-}
-
-std::string jsonError(const std::string& error) {
-    return "{\"ok\":false,\"error\":\"" + xc::escapeJson(error) + "\"}";
-}
-
-QTableWidgetItem* cell(const QString& text) {
-    auto* item = new QTableWidgetItem(text);
-    item->setFlags(item->flags() & ~Qt::ItemIsEditable);
-    return item;
+    return tableItem;
 }
 
 void setupTable(QTableWidget* table, const QStringList& headers) {
@@ -411,794 +77,389 @@ void setupTable(QTableWidget* table, const QStringList& headers) {
     table->setSelectionBehavior(QAbstractItemView::SelectRows);
     table->setSelectionMode(QAbstractItemView::SingleSelection);
     table->setEditTriggers(QAbstractItemView::NoEditTriggers);
-    table->setAlternatingRowColors(true);
     table->setShowGrid(false);
-    table->setGridStyle(Qt::NoPen);
+    table->setAlternatingRowColors(true);
     table->setFrameShape(QFrame::NoFrame);
-    table->setWordWrap(false);
-    table->setFocusPolicy(Qt::NoFocus);
-    table->verticalHeader()->setDefaultSectionSize(26);
-    table->horizontalHeader()->setHighlightSections(false);
 }
 
-class DebuggerWindow final : public QMainWindow {
+class DebuggerShellWindow final : public QMainWindow {
 public:
-    DebuggerWindow() {
-        setWindowTitle("XC 硬件断点调试器");
-        resize(1360, 780);
-        setMinimumSize(1040, 680);
-        buildUi();
-        hitPollTimer_ = new QTimer(this);
-        hitPollTimer_->setInterval(1000);
-        connect(hitPollTimer_, &QTimer::timeout, this, [this] { pollHitRecords(); });
-        startMcpServer();
-        refreshUi();
-    }
+    DebuggerShellWindow() {
+        setWindowTitle(QStringLiteral("XC HWBP Debugger"));
+        resize(1280, 760);
+        setMinimumSize(1040, 640);
 
-    ~DebuggerWindow() override {
-        stopMcpServer();
-        closeAgentSession();
+        buildChrome();
+        buildLeftDock();
+        buildCenter();
+        buildRightDock();
+        buildBottomDock();
+        applyStyles();
     }
 
 private:
-    ClientState state_;
-    SocketHandle agentSocket_ = kInvalidSocket;
-    std::string agentSocketEndpoint_;
-    QLineEdit* endpointEdit_ = nullptr;
-    QLineEdit* targetEdit_ = nullptr;
-    QLineEdit* addressEdit_ = nullptr;
-    QComboBox* typeCombo_ = nullptr;
-    QSpinBox* sizeSpin_ = nullptr;
-    QSpinBox* slotSpin_ = nullptr;
-    QLabel* connectionLabel_ = nullptr;
-    QLabel* driverLabel_ = nullptr;
-    QLabel* mcpLabel_ = nullptr;
-    QLabel* errorLabel_ = nullptr;
-    QTableWidget* breakpointsTable_ = nullptr;
-    QTableWidget* hitRecordsTable_ = nullptr;
-    QLabel* emptyDataLabel_ = nullptr;
-    QPlainTextEdit* hitSnapshotText_ = nullptr;
-    QPlainTextEdit* infoText_ = nullptr;
-    QTimer* hitPollTimer_ = nullptr;
-    QTcpServer* mcpServer_ = nullptr;
-    xc::mcp::McpState* mcpState_ = nullptr;
-    std::size_t selectedHitIndex_ = 0;
-    bool manualHitSelection_ = false;
+    void buildChrome() {
+        auto* header = new QFrame;
+        header->setObjectName("headerBar");
+        auto* layout = new QHBoxLayout(header);
+        layout->setContentsMargins(18, 14, 18, 14);
+        layout->setSpacing(14);
 
-    QLabel* fieldLabel(const QString& text) {
-        auto* label = new QLabel(text);
-        label->setObjectName("fieldLabel");
+        auto* titleBlock = new QWidget;
+        auto* titleLayout = new QVBoxLayout(titleBlock);
+        titleLayout->setContentsMargins(0, 0, 0, 0);
+        titleLayout->setSpacing(2);
+        titleLayout->addWidget(makeLabel(QStringLiteral("XC HWBP Debugger"), "appTitle"));
+        titleLayout->addWidget(makeLabel(QStringLiteral("PC 调试器 GUI 预览壳，断点与 Agent 逻辑暂未接入"), "appSubtitle"));
+
+        layout->addWidget(titleBlock, 1);
+        layout->addWidget(makeStatusBadge(QStringLiteral("Agent 未连接"), "offlineBadge"));
+        layout->addWidget(makeStatusBadge(QStringLiteral("Driver 未检测"), "idleBadge"));
+        layout->addWidget(makeStatusBadge(QStringLiteral("MCP 预览"), "mcpBadge"));
+
+        setMenuWidget(header);
+    }
+
+    QLabel* makeStatusBadge(const QString& text, const QString& objectName) {
+        auto* label = makeLabel(text, objectName);
+        label->setProperty("statusBadge", true);
+        label->setMinimumHeight(28);
+        label->setAlignment(Qt::AlignCenter);
         return label;
     }
 
-    QPushButton* actionButton(const QString& text, const char* role) {
-        auto* button = new QPushButton(text);
-        button->setProperty("role", role);
-        button->setMinimumWidth(56);
-        button->setMaximumHeight(28);
+    void buildLeftDock() {
+        auto* dock = makeDock(QStringLiteral("会话"), "sessionDock");
+        auto* body = makePane("controlRail");
+        auto* layout = paneLayout(body);
+
+        layout->addWidget(makeSectionTitle(QStringLiteral("连接")));
+        auto* endpoint = new QLineEdit(QStringLiteral("192.168.1.10:23946"));
+        endpoint->setPlaceholderText(QStringLiteral("Agent 地址"));
+        layout->addWidget(endpoint);
+        auto* target = new QLineEdit(QStringLiteral("com.tencent.tmgp.sgame"));
+        target->setPlaceholderText(QStringLiteral("进程名或 PID"));
+        layout->addWidget(target);
+
+        auto* connectRow = new QHBoxLayout;
+        connectRow->setSpacing(8);
+        connectRow->addWidget(makeButton(QStringLiteral("连接"), "primaryButton"));
+        connectRow->addWidget(makeButton(QStringLiteral("断开"), "secondaryButton"));
+        layout->addLayout(connectRow);
+
+        layout->addSpacing(10);
+        layout->addWidget(makeSectionTitle(QStringLiteral("断点编辑器")));
+        auto* address = new QLineEdit(QStringLiteral("libtersafe.so+0x488F08"));
+        address->setPlaceholderText(QStringLiteral("module.so+offset 或 0xaddr"));
+        layout->addWidget(address);
+
+        auto* typeRow = new QHBoxLayout;
+        typeRow->setSpacing(8);
+        typeRow->addWidget(makeSmallTool(QStringLiteral("X"), true));
+        typeRow->addWidget(makeSmallTool(QStringLiteral("R"), false));
+        typeRow->addWidget(makeSmallTool(QStringLiteral("W"), false));
+        typeRow->addWidget(makeSmallTool(QStringLiteral("RW"), false));
+        layout->addLayout(typeRow);
+
+        auto* actionRow = new QHBoxLayout;
+        actionRow->setSpacing(8);
+        actionRow->addWidget(makeButton(QStringLiteral("预览添加"), "primaryButton"));
+        actionRow->addWidget(makeButton(QStringLiteral("清空"), "dangerButton"));
+        layout->addLayout(actionRow);
+
+        layout->addSpacing(10);
+        layout->addWidget(makeSectionTitle(QStringLiteral("槽位概览")));
+        slotsTable_ = new QTableWidget;
+        setupTable(slotsTable_, {QStringLiteral("Slot"), QStringLiteral("状态"), QStringLiteral("类型")});
+        slotsTable_->setRowCount(4);
+        for (int row = 0; row < 4; ++row) {
+            slotsTable_->setItem(row, 0, item(QString::number(row)));
+            slotsTable_->setItem(row, 1, item(QStringLiteral("空闲"), QColor("#8291A8")));
+            slotsTable_->setItem(row, 2, item(QStringLiteral("-"), QColor("#8291A8")));
+        }
+        layout->addWidget(slotsTable_, 1);
+        layout->addStretch();
+
+        dock->setWidget(body);
+        addDockWidget(Qt::LeftDockWidgetArea, dock);
+    }
+
+    QToolButton* makeSmallTool(const QString& text, bool checked) {
+        auto* button = new QToolButton;
+        button->setText(text);
+        button->setCheckable(true);
+        button->setChecked(checked);
+        button->setMinimumSize(44, 30);
         return button;
     }
 
-    void buildUi() {
-        auto* central = new QWidget;
-        auto* root = new QVBoxLayout(central);
-        root->setContentsMargins(10, 10, 10, 8);
-        root->setSpacing(8);
-        root->addWidget(buildCommandBar());
-
-        auto* splitter = new QSplitter(Qt::Horizontal);
-        splitter->addWidget(buildHitStreamPane());
-        splitter->addWidget(buildRegisterInspector());
-        splitter->setSizes({440, 920});
-        splitter->setStretchFactor(0, 0);
-        splitter->setStretchFactor(1, 1);
-        root->addWidget(splitter, 1);
-
-        setCentralWidget(central);
-        applyStyle();
+    QLabel* makeSectionTitle(const QString& text) {
+        return makeLabel(text, "sectionTitle");
     }
 
-    QWidget* buildCommandBar() {
-        auto* frame = new QFrame;
-        frame->setObjectName("commandBar");
-        auto* layout = new QVBoxLayout(frame);
-        layout->setContentsMargins(10, 8, 10, 8);
-        layout->setSpacing(7);
+    void buildCenter() {
+        auto* center = makePane("activityPane");
+        auto* layout = paneLayout(center);
 
-        auto* controls = new QHBoxLayout;
-        controls->setContentsMargins(0, 0, 0, 0);
-        controls->setSpacing(6);
+        auto* titleRow = new QHBoxLayout;
+        titleRow->setSpacing(10);
+        titleRow->addWidget(makeLabel(QStringLiteral("断点与命中"), "workspaceTitle"));
+        titleRow->addStretch();
+        titleRow->addWidget(makeButton(QStringLiteral("刷新"), "secondaryButton"));
+        titleRow->addWidget(makeButton(QStringLiteral("导出"), "secondaryButton"));
+        layout->addLayout(titleRow);
 
-        endpointEdit_ = new QLineEdit(qstr(state_.endpoint));
-        targetEdit_ = new QLineEdit(qstr(state_.target));
-        endpointEdit_->setPlaceholderText("手机 IP");
-        targetEdit_->setPlaceholderText("包名或 PID");
-        endpointEdit_->setMinimumWidth(128);
-        endpointEdit_->setMaximumWidth(156);
-        targetEdit_->setMinimumWidth(188);
-        targetEdit_->setMaximumWidth(260);
-
-        addressEdit_ = new QLineEdit;
-        addressEdit_->setPlaceholderText("绝对地址或 libtersafe.so+0x488F08");
-        addressEdit_->setMinimumWidth(300);
-
-        typeCombo_ = new QComboBox;
-        typeCombo_->addItems({"x", "r", "w", "rw"});
-        typeCombo_->setMinimumWidth(52);
-        typeCombo_->setMaximumWidth(58);
-        sizeSpin_ = new QSpinBox;
-        sizeSpin_->setRange(1, 8);
-        sizeSpin_->setValue(4);
-        sizeSpin_->setMinimumWidth(52);
-        sizeSpin_->setMaximumWidth(58);
-        slotSpin_ = new QSpinBox;
-        slotSpin_->setRange(0, 3);
-        slotSpin_->setMinimumWidth(52);
-        slotSpin_->setMaximumWidth(58);
-
-        auto* connectButton = actionButton("连接", "primaryButton");
-        auto* disconnectButton = actionButton("断开", "secondaryButton");
-        auto* probeButton = actionButton("检测", "secondaryButton");
-        auto* setButton = actionButton("下断", "primaryButton");
-        auto* removeButton = actionButton("删断", "dangerButton");
-        auto* infoButton = actionButton("刷新", "secondaryButton");
-
-        controls->addWidget(fieldLabel("Agent"));
-        controls->addWidget(endpointEdit_);
-        controls->addWidget(fieldLabel("目标"));
-        controls->addWidget(targetEdit_);
-        controls->addWidget(fieldLabel("断点"));
-        controls->addWidget(addressEdit_, 1);
-        controls->addWidget(fieldLabel("类型"));
-        controls->addWidget(typeCombo_);
-        controls->addWidget(fieldLabel("长度"));
-        controls->addWidget(sizeSpin_);
-        controls->addWidget(fieldLabel("槽"));
-        controls->addWidget(slotSpin_);
-        controls->addWidget(connectButton);
-        controls->addWidget(disconnectButton);
-        controls->addWidget(probeButton);
-        controls->addWidget(setButton);
-        controls->addWidget(removeButton);
-        controls->addWidget(infoButton);
-
-        auto* status = new QHBoxLayout;
-        status->setContentsMargins(0, 0, 0, 0);
-        status->setSpacing(16);
-        connectionLabel_ = new QLabel;
-        driverLabel_ = new QLabel;
-        mcpLabel_ = new QLabel;
-        errorLabel_ = new QLabel;
-        connectionLabel_->setObjectName("statusText");
-        driverLabel_->setObjectName("statusText");
-        mcpLabel_->setObjectName("statusText");
-        errorLabel_->setObjectName("statusText");
-        connectionLabel_->setMinimumWidth(84);
-        driverLabel_->setTextInteractionFlags(Qt::TextSelectableByMouse);
-        mcpLabel_->setTextInteractionFlags(Qt::TextSelectableByMouse);
-        errorLabel_->setTextInteractionFlags(Qt::TextSelectableByMouse);
-        status->addWidget(connectionLabel_);
-        status->addWidget(driverLabel_, 1);
-        status->addWidget(mcpLabel_, 1);
-        status->addWidget(errorLabel_, 1);
-
-        layout->addLayout(controls);
-        layout->addLayout(status);
-
-        connect(connectButton, &QPushButton::clicked, this, [this] { markConnected(); });
-        connect(probeButton, &QPushButton::clicked, this, [this] { markConnected(); });
-        connect(disconnectButton, &QPushButton::clicked, this, [this] { disconnectAgent(); });
-        connect(setButton, &QPushButton::clicked, this, [this] { setBreakpoint(); });
-        connect(removeButton, &QPushButton::clicked, this, [this] { removeBreakpoint(); });
-        connect(infoButton, &QPushButton::clicked, this, [this] { queryBreakpointInfo(); });
-        return frame;
-    }
-
-    QWidget* buildHitStreamPane() {
-        auto* frame = new QFrame;
-        frame->setObjectName("hitStreamPane");
-        frame->setMinimumWidth(390);
-        frame->setMaximumWidth(540);
-        auto* layout = new QVBoxLayout(frame);
-        layout->setContentsMargins(10, 10, 10, 10);
-        layout->setSpacing(8);
-
-        auto* title = new QLabel("断点 / 命中流");
-        title->setObjectName("paneTitle");
         breakpointsTable_ = new QTableWidget;
-        setupTable(breakpointsTable_, {"槽", "类型", "模块/偏移", "实际地址", "状态"});
-        breakpointsTable_->horizontalHeader()->setStretchLastSection(false);
-        breakpointsTable_->horizontalHeader()->setSectionResizeMode(0, QHeaderView::ResizeToContents);
-        breakpointsTable_->horizontalHeader()->setSectionResizeMode(1, QHeaderView::ResizeToContents);
-        breakpointsTable_->horizontalHeader()->setSectionResizeMode(2, QHeaderView::Stretch);
-        breakpointsTable_->horizontalHeader()->setSectionResizeMode(3, QHeaderView::ResizeToContents);
-        breakpointsTable_->horizontalHeader()->setSectionResizeMode(4, QHeaderView::ResizeToContents);
-        connect(breakpointsTable_, &QTableWidget::itemSelectionChanged, this, [this] {
-            const int row = breakpointsTable_->currentRow();
-            if (row >= 0) {
-                slotSpin_->setValue(row);
-                queryHitRecords(static_cast<std::uint32_t>(row));
-            }
-        });
-
-        auto* hitsTitle = new QLabel("命中流");
-        hitsTitle->setObjectName("paneHint");
-        hitRecordsTable_ = new QTableWidget;
-        hitRecordsTable_->setColumnCount(2);
-        setupTable(hitRecordsTable_, {"#", "命中"});
-        hitRecordsTable_->horizontalHeader()->setStretchLastSection(true);
-        hitRecordsTable_->horizontalHeader()->setSectionResizeMode(0, QHeaderView::ResizeToContents);
-        hitRecordsTable_->horizontalHeader()->setSectionResizeMode(1, QHeaderView::Stretch);
-        connect(hitRecordsTable_, &QTableWidget::itemSelectionChanged, this, [this] {
-            const int row = hitRecordsTable_->currentRow();
-            if (row >= 0) {
-                selectedHitIndex_ = static_cast<std::size_t>(row);
-                state_.selectedHitIndex = selectedHitIndex_;
-                manualHitSelection_ = true;
-                refreshHitDetails();
-            }
-        });
-
-        layout->addWidget(title);
-        layout->addWidget(breakpointsTable_, 1);
-        layout->addWidget(hitsTitle);
-        layout->addWidget(hitRecordsTable_, 2);
-        return frame;
-    }
-
-    QWidget* buildRegisterInspector() {
-        auto* frame = new QFrame;
-        frame->setObjectName("registerInspector");
-        auto* layout = new QVBoxLayout(frame);
-        layout->setContentsMargins(10, 10, 10, 10);
-        layout->setSpacing(8);
-
-        emptyDataLabel_ = new QLabel("等待真实断点命中数据");
-        emptyDataLabel_->setObjectName("emptyDataLabel");
-        emptyDataLabel_->setAlignment(Qt::AlignCenter);
-        emptyDataLabel_->setMinimumHeight(30);
-
-        auto* titleBar = new QHBoxLayout;
-        titleBar->setContentsMargins(0, 0, 0, 0);
-        titleBar->setSpacing(8);
-        auto* title = new QLabel("寄存器");
-        title->setObjectName("paneTitle");
-        auto* copyCurrentButton = actionButton("复制当前命中", "secondaryButton");
-        auto* copyAllButton = actionButton("复制全部命中", "secondaryButton");
-        titleBar->addWidget(title);
-        titleBar->addStretch(1);
-        titleBar->addWidget(copyCurrentButton);
-        titleBar->addWidget(copyAllButton);
-        connect(copyCurrentButton, &QPushButton::clicked, this, [this] { copyCurrentHit(); });
-        connect(copyAllButton, &QPushButton::clicked, this, [this] { copyAllHits(); });
-
-        auto* detailSplitter = new QSplitter(Qt::Vertical);
-        hitSnapshotText_ = new QPlainTextEdit;
-        hitSnapshotText_->setReadOnly(true);
-        hitSnapshotText_->setObjectName("hitSnapshotText");
-        hitSnapshotText_->setFrameShape(QFrame::NoFrame);
-        infoText_ = new QPlainTextEdit;
-        infoText_->setReadOnly(true);
-        infoText_->setObjectName("infoText");
-        infoText_->setFrameShape(QFrame::NoFrame);
-        detailSplitter->addWidget(hitSnapshotText_);
-        detailSplitter->addWidget(infoText_);
-        detailSplitter->setSizes({560, 120});
-
-        layout->addLayout(titleBar);
-        layout->addWidget(emptyDataLabel_);
-        layout->addWidget(detailSplitter, 1);
-        return frame;
-    }
-
-    bool applyInputs(bool requireAddress) {
-        const QString endpoint = endpointEdit_->text().trimmed();
-        const QString target = targetEdit_->text().trimmed();
-        const QString addressText = addressEdit_->text().trimmed();
-        BreakpointAddressInput input;
-        if (!addressText.isEmpty()) {
-            input = parseBreakpointAddress(stdstr(addressText));
-        }
-        if (requireAddress && !input.valid) {
-            state_.lastError = "请先输入有效断点地址";
-            state_.lastAction = "输入错误: 支持 0x地址 或 libtersafe.so+0x偏移";
-            return false;
-        }
-
-        if (!endpoint.isEmpty()) {
-            state_.endpoint = stdstr(endpoint);
-        }
-        if (!target.isEmpty()) {
-            state_.target = stdstr(target);
-        }
-        state_.breakpointInput = input;
-        state_.breakpointType = protocolTypeForUi(typeCombo_->currentText());
-        state_.breakpointSize = static_cast<std::uint32_t>(sizeSpin_->value());
-        return true;
-    }
-
-    bool hasAgentSocket() const {
-        return agentSocket_ != kInvalidSocket;
-    }
-
-    void closeAgentSession() {
-        if (hasAgentSocket()) {
-            closeSocket(agentSocket_);
-            agentSocket_ = kInvalidSocket;
-        }
-        agentSocketEndpoint_.clear();
-    }
-
-    bool ensureAgentSession(std::string& error) {
-        if (hasAgentSocket() && agentSocketEndpoint_ == state_.endpoint && state_.helloOk) {
-            state_.connected = true;
-            return true;
-        }
-
-        closeAgentSession();
-        SocketHandle socket = kInvalidSocket;
-        xc::HelloResponse hello;
-        if (!openAgentSession(state_.endpoint, socket, hello, error)) {
-            state_.connected = false;
-            state_.helloOk = false;
-            return false;
-        }
-
-        agentSocket_ = socket;
-        agentSocketEndpoint_ = state_.endpoint;
-        state_.hello = hello;
-        state_.helloOk = true;
-        state_.connected = true;
-        return true;
-    }
-
-    std::string sendAgentRequest(const std::string& request, std::string& error, const std::string& sendFailure) {
-        if (!ensureAgentSession(error)) {
-            return {};
-        }
-        if (!sendLine(agentSocket_, request)) {
-            error = sendFailure;
-            closeAgentSession();
-            state_.connected = false;
-            state_.helloOk = false;
-            return {};
-        }
-        const std::string responseLine = receiveLine(agentSocket_, error);
-        if (responseLine.empty()) {
-            closeAgentSession();
-            state_.connected = false;
-            state_.helloOk = false;
-            return {};
-        }
-        state_.connected = true;
-        return responseLine;
-    }
-
-    void startMcpServer() {
-        mcpState_ = xc::mcp::createState();
-        mcpServer_ = new QTcpServer(this);
-        connect(mcpServer_, &QTcpServer::newConnection, this, [this] { acceptMcpConnection(); });
-        const auto port = xc::mcp::defaultHttpPort();
-        if (!mcpServer_->listen(QHostAddress::LocalHost, port)) {
-            state_.mcpStatus = "MCP: 启动失败 " + stdstr(mcpServer_->errorString());
-            return;
-        }
-        state_.mcpStatus = "MCP: http://127.0.0.1:" + std::to_string(port) + "/mcp";
-    }
-
-    void stopMcpServer() {
-        if (mcpServer_) {
-            mcpServer_->close();
-        }
-        if (mcpState_) {
-            xc::mcp::destroyState(mcpState_);
-            mcpState_ = nullptr;
-        }
-    }
-
-    void acceptMcpConnection() {
-        while (mcpServer_ && mcpServer_->hasPendingConnections()) {
-            QTcpSocket* socket = mcpServer_->nextPendingConnection();
-            auto* buffer = new QByteArray;
-            connect(socket, &QTcpSocket::readyRead, this, [this, socket, buffer] {
-                buffer->append(socket->readAll());
-                handleMcpHttpBuffer(socket, *buffer);
-            });
-            connect(socket, &QTcpSocket::disconnected, socket, &QTcpSocket::deleteLater);
-            connect(socket, &QTcpSocket::destroyed, this, [buffer] { delete buffer; });
-        }
-    }
-
-    void handleMcpHttpBuffer(QTcpSocket* socket, const QByteArray& buffer) {
-        const int headerEnd = buffer.indexOf("\r\n\r\n");
-        if (headerEnd < 0) {
-            return;
-        }
-        const QByteArray header = buffer.left(headerEnd);
-        int contentLength = 0;
-        const QList<QByteArray> lines = header.split('\n');
-        for (QByteArray line : lines) {
-            line = line.trimmed();
-            if (line.toLower().startsWith("content-length:")) {
-                contentLength = line.mid(15).trimmed().toInt();
-            }
-        }
-        const int bodyStart = headerEnd + 4;
-        if (buffer.size() - bodyStart < contentLength) {
-            return;
-        }
-        const QByteArray body = buffer.mid(bodyStart, contentLength);
-        sendMcpHttpResponse(socket, body);
-    }
-
-    void sendMcpHttpResponse(QTcpSocket* socket, const QByteArray& body) {
-        if (!mcpState_) {
-            writeHttp(socket, 503, "application/json", "{\"error\":\"MCP state unavailable\"}");
-            return;
-        }
-        xc::mcp::setDefaults(*mcpState_, state_.endpoint, state_.target);
-        const std::string response = xc::mcp::handleRequest(*mcpState_, std::string_view(body.constData(), static_cast<std::size_t>(body.size())));
-        if (response.empty()) {
-            writeHttp(socket, 202, "application/json", "{}");
-            return;
-        }
-        writeHttp(socket, 200, "application/json", response);
-    }
-
-    void writeHttp(QTcpSocket* socket, int statusCode, const char* contentType, const std::string& body) {
-        const char* reason = statusCode == 200 ? "OK" : (statusCode == 202 ? "Accepted" : "Service Unavailable");
-        QByteArray response;
-        response.append("HTTP/1.1 ");
-        response.append(QByteArray::number(statusCode));
-        response.append(' ');
-        response.append(reason);
-        response.append("\r\nContent-Type: ");
-        response.append(contentType);
-        response.append("\r\nAccess-Control-Allow-Origin: *\r\nConnection: close\r\nContent-Length: ");
-        response.append(QByteArray::number(static_cast<qsizetype>(body.size())));
-        response.append("\r\n\r\n");
-        response.append(body.data(), static_cast<qsizetype>(body.size()));
-        socket->write(response);
-        socket->disconnectFromHost();
-    }
-
-    void markConnected() {
-        applyInputs(false);
-        state_.lastAction = "正在连接 " + state_.endpoint + ":" + std::to_string(xc::kDefaultAgentPort);
-        refreshUi();
-
-        closeAgentSession();
-        std::string error;
-        const std::string statusLine = sendAgentRequest(
-            xc::driverStatusRequestJson(state_.requestId++),
-            error,
-            "发送 driver.status 失败");
-        if (statusLine.empty()) {
-            state_.lastError = error;
-            state_.lastAction = "连接失败: " + error;
-            refreshUi();
-            return;
-        }
-
-        state_.driver = xc::parseDriverStatusResponse(statusLine);
-        state_.lastError.clear();
-        state_.lastAction = state_.driver.ok ? "已连接 Agent，驱动状态已刷新" : "已连接 Agent，但驱动状态返回错误";
-        updateHitPolling();
-        refreshUi();
-    }
-
-    void disconnectAgent() {
-        if (hitPollTimer_) {
-            hitPollTimer_->stop();
-        }
-        closeAgentSession();
-        state_.connected = false;
-        state_.helloOk = false;
-        state_.driver = {};
-        state_.lastBreakpointInfo.clear();
-        state_.hitRecords = {};
-        state_.selectedHitIndex = 0;
-        selectedHitIndex_ = 0;
-        manualHitSelection_ = false;
-        for (int i = 0; i < 4; ++i) {
-            state_.breakpoints[i] = {};
-            state_.breakpointLabels[i].clear();
-        }
-        state_.lastError = "已断开";
-        state_.lastAction = "已断开连接";
-        refreshUi();
-    }
-
-    void setBreakpoint() {
-        if (!applyInputs(true)) {
-            refreshUi();
-            return;
-        }
-        const auto slot = static_cast<std::size_t>(slotSpin_->value());
-        state_.lastAction = "正在写入硬件断点 slot" + std::to_string(slot);
-        refreshUi();
-
-        std::string error;
-        const std::string request = state_.breakpointInput.module.empty()
-            ? xc::breakpointSetRequestJson(state_.requestId++, static_cast<std::uint32_t>(slot), state_.breakpointInput.address, state_.breakpointType, state_.breakpointSize, state_.target)
-            : xc::breakpointSetModuleRequestJson(state_.requestId++, static_cast<std::uint32_t>(slot), state_.breakpointInput.module, state_.breakpointInput.offset, state_.breakpointType, state_.breakpointSize, state_.target);
-        const std::string responseLine = sendAgentRequest(request, error, "发送 breakpoint.set 失败");
-        if (responseLine.empty()) {
-            state_.lastError = error;
-            state_.lastAction = "下断失败: " + error;
-            refreshUi();
-            return;
-        }
-
-        const auto response = xc::parseBreakpointSetResponse(responseLine);
-        state_.breakpoints[slot] = response;
-        state_.breakpointLabels[slot] = displayAddress(state_.breakpointInput);
-        state_.lastError = response.ok ? "" : response.error;
-        state_.lastAction = response.ok ? response.message : "下断失败: " + response.error;
-        if (response.ok) {
-            updateHitPolling();
-            queryHitRecords(static_cast<std::uint32_t>(slot));
-            return;
-        }
-        refreshUi();
-    }
-
-    void removeBreakpoint() {
-        applyInputs(false);
-        const auto slot = static_cast<std::size_t>(slotSpin_->value());
-        state_.lastAction = "正在删除硬件断点 slot" + std::to_string(slot);
-        refreshUi();
-
-        std::string error;
-        const std::string responseLine = sendAgentRequest(
-            xc::breakpointRemoveRequestJson(state_.requestId++, static_cast<std::uint32_t>(slot), state_.target),
-            error,
-            "发送 breakpoint.remove 失败");
-        if (responseLine.empty()) {
-            state_.lastError = error;
-            state_.lastAction = "删断失败: " + error;
-            refreshUi();
-            return;
-        }
-        const auto response = xc::parseBreakpointRemoveResponse(responseLine);
-        if (response.ok) {
-            state_.breakpoints[slot] = {};
-            state_.breakpointLabels[slot].clear();
-            state_.hitRecords = {};
-            state_.selectedHitIndex = 0;
-            selectedHitIndex_ = 0;
-            manualHitSelection_ = false;
-        }
-        updateHitPolling();
-        state_.lastError = response.ok ? "" : response.error;
-        state_.lastAction = response.ok ? response.message : "删断失败: " + response.error;
-        refreshUi();
-    }
-
-    void queryBreakpointInfo() {
-        applyInputs(false);
-        state_.lastAction = "正在查询硬件断点信息";
-        refreshUi();
-
-        std::string error;
-        const std::string responseLine = sendAgentRequest(
-            xc::breakpointInfoRequestJson(state_.requestId++),
-            error,
-            "发送 breakpoint.info 失败");
-        if (responseLine.empty()) {
-            state_.lastError = error;
-            state_.lastAction = "查询断点失败: " + error;
-            state_.lastBreakpointInfo = jsonError(error);
-            refreshUi();
-            return;
-        }
-        state_.lastError.clear();
-        state_.lastAction = "硬件断点信息已刷新";
-        state_.lastBreakpointInfo = responseLine;
-        queryHitRecords(static_cast<std::uint32_t>(slotSpin_->value()));
-    }
-
-    void queryHitRecords(std::uint32_t slot) {
-        std::string error;
-        const std::string responseLine = sendAgentRequest(
-            xc::recordsGetRequestJson(state_.requestId++, slot, state_.target),
-            error,
-            "发送 records.get 失败");
-        if (responseLine.empty()) {
-            state_.lastError = error;
-            state_.lastAction = "查询命中记录失败: " + error;
-            state_.hitRecords = {};
-            state_.selectedHitIndex = 0;
-            selectedHitIndex_ = 0;
-            manualHitSelection_ = false;
-            refreshUi();
-            return;
-        }
-
-        state_.hitRecords = xc::parseRecordsGetResponse(responseLine);
-        if (!state_.hitRecords.records.empty()) {
-            if (!manualHitSelection_ || selectedHitIndex_ >= state_.hitRecords.records.size()) {
-                selectedHitIndex_ = state_.hitRecords.records.size() - 1;
-            }
-            state_.selectedHitIndex = selectedHitIndex_;
-        } else {
-            selectedHitIndex_ = 0;
-            state_.selectedHitIndex = 0;
-            manualHitSelection_ = false;
-        }
-        if (!state_.hitRecords.ok) {
-            state_.lastError = state_.hitRecords.error;
-            state_.lastAction = "查询命中记录失败: " + state_.hitRecords.error;
-        } else if (!state_.hitRecords.records.empty()) {
-            state_.lastError.clear();
-            state_.lastAction = "断点命中记录已刷新: slot" + std::to_string(slot)
-                + " hitCount=" + std::to_string(state_.hitRecords.records.back().hitCount);
-        }
-        refreshUi();
-    }
-
-    void pollHitRecords() {
-        if (!state_.connected || !hasAgentSocket()) {
-            updateHitPolling();
-            return;
-        }
-        for (std::uint32_t slot = 0; slot < 4; ++slot) {
-            if (state_.breakpoints[slot].ok && state_.breakpoints[slot].enabled) {
-                queryHitRecords(slot);
-                return;
-            }
-        }
-        updateHitPolling();
-    }
-
-    void updateHitPolling() {
-        bool hasActiveBreakpoint = false;
-        for (const auto& breakpoint : state_.breakpoints) {
-            if (breakpoint.ok && breakpoint.enabled) {
-                hasActiveBreakpoint = true;
-                break;
-            }
-        }
-        if (hasActiveBreakpoint && state_.connected) {
-            if (!hitPollTimer_->isActive()) {
-                hitPollTimer_->start();
-            }
-            return;
-        }
-        hitPollTimer_->stop();
-    }
-
-    void refreshUi() {
-        connectionLabel_->setText(state_.connected ? "Agent 在线" : "Agent 未连接");
-        driverLabel_->setText("驱动: " + QString(state_.driver.moduleLoaded ? "已加载" : "未加载")
-            + "  /proc/modules: " + QString(state_.driver.procModulesReadable ? "可读" : "未确认")
-            + "  协议: " + qstr(std::string(xc::kProtocolName)) + " v" + QString::number(xc::kProtocolVersion));
-        mcpLabel_->setText(qstr(state_.mcpStatus));
-        errorLabel_->setText(state_.lastError.empty() ? "错误: 无" : "错误: " + qstr(state_.lastError));
-
-        refreshBreakpointsTable();
-        refreshHitRecordsTable();
-        refreshHitDetails();
-        infoText_->setPlainText(state_.lastBreakpointInfo.empty()
-            ? "断点信息\n\n只显示 Agent 返回的真实断点和命中信息。启动时不填充模拟数据。"
-            : qstr(state_.lastBreakpointInfo));
-        statusBar()->showMessage(qstr(state_.lastAction));
-    }
-
-    void refreshHitDetails() {
-        const bool hasHit = state_.hitRecords.ok && !state_.hitRecords.records.empty();
-        emptyDataLabel_->setText(hasHit
-            ? "已收到真实断点命中数据"
-            : (state_.connected ? "等待真实断点命中数据，当前没有寄存器和调用栈快照" : "等待真实断点命中数据，请先连接 Agent"));
-        hitSnapshotText_->setPlainText(qstr(formatHitSnapshot(state_.hitRecords, currentHitRecord(), resolverContext())));
-    }
-
-    void copyCurrentHit() {
-        QApplication::clipboard()->setText(hitSnapshotText_->toPlainText());
-        state_.lastAction = "已复制当前命中快照";
-        statusBar()->showMessage(qstr(state_.lastAction));
-    }
-
-    void copyAllHits() {
-        QApplication::clipboard()->setText(qstr(formatHitListText(state_.hitRecords, resolverContext())));
-        state_.lastAction = "已复制全部命中列表";
-        statusBar()->showMessage(qstr(state_.lastAction));
-    }
-
-    const xc::HitRecord* currentHitRecord() const {
-        if (!state_.hitRecords.ok || state_.hitRecords.records.empty()) {
-            return nullptr;
-        }
-        const std::size_t index = selectedHitIndex_ < state_.hitRecords.records.size() ? selectedHitIndex_ : state_.hitRecords.records.size() - 1;
-        return &state_.hitRecords.records[index];
-    }
-
-    AddressResolverContext resolverContext() const {
-        AddressResolverContext context;
-        context.modules = state_.hitRecords.modules;
-        return context;
-    }
-
-    void refreshHitRecordsTable() {
-        hitRecordsTable_->setRowCount(0);
-        const bool oldSignalsBlocked = hitRecordsTable_->blockSignals(true);
-        if (!state_.hitRecords.ok || state_.hitRecords.records.empty()) {
-            hitRecordsTable_->blockSignals(oldSignalsBlocked);
-            return;
-        }
-        const AddressResolverContext context = resolverContext();
-        hitRecordsTable_->setRowCount(static_cast<int>(state_.hitRecords.records.size()));
-        for (int row = 0; row < static_cast<int>(state_.hitRecords.records.size()); ++row) {
-            hitRecordsTable_->setItem(row, 0, cell(QString("#%1").arg(xc::visibleHitNumber(state_.hitRecords, static_cast<std::size_t>(row)))));
-            hitRecordsTable_->setItem(row, 1, cell(qstr(hitSummaryLine(state_.hitRecords, static_cast<std::size_t>(row), context))));
-        }
-        hitRecordsTable_->resizeColumnsToContents();
-        hitRecordsTable_->horizontalHeader()->setSectionResizeMode(1, QHeaderView::Stretch);
-        const int selectedRow = static_cast<int>(selectedHitIndex_ < state_.hitRecords.records.size() ? selectedHitIndex_ : state_.hitRecords.records.size() - 1);
-        if (hitRecordsTable_->currentRow() != selectedRow) {
-            hitRecordsTable_->selectRow(selectedRow);
-        }
-        hitRecordsTable_->blockSignals(oldSignalsBlocked);
-    }
-
-    void refreshBreakpointsTable() {
+        setupTable(breakpointsTable_, {QStringLiteral("Slot"), QStringLiteral("地址"), QStringLiteral("类型"), QStringLiteral("命中"), QStringLiteral("状态")});
         breakpointsTable_->setRowCount(4);
         for (int row = 0; row < 4; ++row) {
-            const auto& bp = state_.breakpoints[row];
-            const QString label = state_.breakpointLabels[row].empty() ? "-" : qstr(state_.breakpointLabels[row]);
-            breakpointsTable_->setItem(row, 0, cell(QString::number(row)));
-            breakpointsTable_->setItem(row, 1, cell(bp.ok ? typeLabel(bp.type) : "-"));
-            breakpointsTable_->setItem(row, 2, cell(label));
-            breakpointsTable_->setItem(row, 3, cell(bp.ok && bp.address != 0 ? qstr(xc::hexAddress(bp.address)) : "-"));
-            breakpointsTable_->setItem(row, 4, cell(bp.ok && bp.enabled ? "已下断，等待命中" : "空"));
+            breakpointsTable_->setItem(row, 0, item(QString::number(row)));
+            breakpointsTable_->setItem(row, 1, item(QStringLiteral("等待配置"), QColor("#8291A8")));
+            breakpointsTable_->setItem(row, 2, item(QStringLiteral("-"), QColor("#8291A8")));
+            breakpointsTable_->setItem(row, 3, item(QStringLiteral("0"), QColor("#8291A8")));
+            breakpointsTable_->setItem(row, 4, item(QStringLiteral("未启用"), QColor("#8291A8")));
         }
-        breakpointsTable_->resizeColumnsToContents();
-        breakpointsTable_->horizontalHeader()->setSectionResizeMode(2, QHeaderView::Stretch);
+        layout->addWidget(breakpointsTable_, 2);
+
+        layout->addWidget(makeLabel(QStringLiteral("命中流"), "sectionTitle"));
+        hitsTable_ = new QTableWidget;
+        setupTable(hitsTable_, {QStringLiteral("时间"), QStringLiteral("Slot"), QStringLiteral("摘要")});
+        hitsTable_->setRowCount(3);
+        hitsTable_->setItem(0, 0, item(QStringLiteral("--:--:--"), QColor("#8291A8")));
+        hitsTable_->setItem(0, 1, item(QStringLiteral("-"), QColor("#8291A8")));
+        hitsTable_->setItem(0, 2, item(QStringLiteral("等待真实断点命中数据"), QColor("#8291A8")));
+        hitsTable_->setItem(1, 0, item(QStringLiteral("--:--:--"), QColor("#8291A8")));
+        hitsTable_->setItem(1, 1, item(QStringLiteral("-"), QColor("#8291A8")));
+        hitsTable_->setItem(1, 2, item(QStringLiteral("连接 Agent 后这里显示命中事件"), QColor("#8291A8")));
+        hitsTable_->setItem(2, 0, item(QStringLiteral("--:--:--"), QColor("#8291A8")));
+        hitsTable_->setItem(2, 1, item(QStringLiteral("-"), QColor("#8291A8")));
+        hitsTable_->setItem(2, 2, item(QStringLiteral("选择事件后右侧显示寄存器快照"), QColor("#8291A8")));
+        layout->addWidget(hitsTable_, 3);
+
+        setCentralWidget(center);
     }
 
-    void applyStyle() {
-        setStyleSheet(R"(
-            QWidget { background: #111318; color: #d9dee7; font-family: "Microsoft YaHei UI", "Microsoft YaHei"; font-size: 12px; }
-            QFrame#commandBar, QFrame#hitStreamPane, QFrame#registerInspector, QStatusBar { background: #181b21; border: 1px solid #303640; border-radius: 2px; }
-            QStatusBar { color: #9ca6b4; padding-left: 6px; }
-            QLabel#fieldLabel { color: #9aa4b2; font-size: 11px; font-weight: 600; }
-            QLabel#paneTitle { color: #eef2f7; font-size: 13px; font-weight: 700; }
-            QLabel#paneHint, QLabel#statusText { color: #a3adba; font-size: 11px; }
-            QLineEdit, QComboBox, QSpinBox, QPlainTextEdit, QTableWidget { background: #0d0f14; border: 1px solid #303640; border-radius: 2px; color: #e6ebf2; selection-background-color: #245b78; selection-color: #ffffff; }
-            QLineEdit:focus, QComboBox:focus, QSpinBox:focus { border: 1px solid #5d8fb0; }
-            QLineEdit, QComboBox, QSpinBox { min-height: 26px; max-height: 26px; padding: 1px 7px; }
-            QComboBox::drop-down { width: 16px; border: none; }
-            QSpinBox::up-button, QSpinBox::down-button { width: 14px; border: none; background: #171b22; }
-            QPushButton { background: #232a33; border: 1px solid #3a4350; border-radius: 2px; color: #f0f4f8; min-height: 26px; max-height: 26px; padding: 1px 10px; font-size: 12px; font-weight: 600; }
-            QPushButton:hover { background: #2a323d; border-color: #515d6d; }
-            QPushButton:pressed { background: #1c222b; }
-            QPushButton[role="primaryButton"] { background: #286f91; border-color: #3c8eb5; color: #ffffff; }
-            QPushButton[role="primaryButton"]:hover { background: #2f7fa4; }
-            QPushButton[role="secondaryButton"] { background: #20262f; }
-            QPushButton[role="dangerButton"] { background: #4a252b; border-color: #74414a; color: #ffe1e5; }
-            QPushButton[role="dangerButton"]:hover { background: #5a2c34; }
-            QHeaderView::section { background: #20262f; border: none; border-right: 1px solid #333b47; color: #cbd3df; padding: 6px 7px; font-size: 11px; font-weight: 600; }
-            QTableWidget { alternate-background-color: #11151b; gridline-color: transparent; outline: none; }
-            QTableWidget::item { padding: 3px 7px; border: none; }
-            QTableWidget::item:selected { background: #244f69; color: #ffffff; }
-            QPlainTextEdit { font-family: "Cascadia Mono", "Consolas"; font-size: 12px; line-height: 1.3; padding: 8px; }
-            QLabel#emptyDataLabel { background: #0d0f14; border: 1px solid #303640; border-radius: 2px; color: #9cc7e0; font-size: 12px; font-weight: 600; }
-            QSplitter::handle { background: #111318; }
-            QSplitter::handle:hover { background: #303640; }
-            QSplitter::handle:horizontal { width: 6px; }
-            QSplitter::handle:vertical { height: 6px; }
-        )");
+    void buildRightDock() {
+        auto* dock = makeDock(QStringLiteral("检查器"), "inspectorDock");
+        auto* tabs = new QTabWidget;
+        tabs->setObjectName("inspectorTabs");
+
+        auto* registers = makePane("inspectorPane");
+        auto* registerLayout = paneLayout(registers);
+        registerText_ = new QPlainTextEdit;
+        registerText_->setReadOnly(true);
+        registerText_->setPlainText(QStringLiteral(
+            "寄存器快照\n\n"
+            "等待真实断点命中数据。\n"
+            "后续接入 records.get 后，这里显示 PC / LR / SP / X0-X29。"));
+        registerLayout->addWidget(registerText_);
+        tabs->addTab(registers, QStringLiteral("寄存器"));
+
+        auto* modules = makePane("modulesPane");
+        auto* moduleLayout = paneLayout(modules);
+        modulesText_ = new QPlainTextEdit;
+        modulesText_->setReadOnly(true);
+        modulesText_->setPlainText(QStringLiteral(
+            "模块列表\n\n"
+            "等待 Agent maps 数据。\n"
+            "这里会显示 so 基址、大小和权限。"));
+        moduleLayout->addWidget(modulesText_);
+        tabs->addTab(modules, QStringLiteral("模块"));
+
+        auto* raw = makePane("rawPane");
+        auto* rawLayout = paneLayout(raw);
+        rawText_ = new QPlainTextEdit;
+        rawText_->setReadOnly(true);
+        rawText_->setPlainText(mcpPreviewResponse() + QStringLiteral("\n\n原始 JSON 和 MCP 请求预览后续接入。"));
+        rawLayout->addWidget(rawText_);
+        tabs->addTab(raw, QStringLiteral("原始"));
+
+        dock->setWidget(tabs);
+        addDockWidget(Qt::RightDockWidgetArea, dock);
     }
+
+    void buildBottomDock() {
+        auto* dock = makeDock(QStringLiteral("输出"), "outputDock");
+        logText_ = new QPlainTextEdit;
+        logText_->setObjectName("logView");
+        logText_->setReadOnly(true);
+        logText_->setPlainText(QStringLiteral(
+            "[ui] GUI 壳已启动\n"
+            "[agent] 未连接，按钮暂为界面预览\n"
+            "[mcp] 预留本地端点 http://127.0.0.1:23947/mcp"));
+        dock->setWidget(logText_);
+        addDockWidget(Qt::BottomDockWidgetArea, dock);
+        resizeDocks({dock}, {160}, Qt::Vertical);
+    }
+
+    QDockWidget* makeDock(const QString& title, const QString& objectName) {
+        auto* dock = new QDockWidget(title, this);
+        dock->setObjectName(objectName);
+        dock->setAllowedAreas(Qt::LeftDockWidgetArea | Qt::RightDockWidgetArea | Qt::BottomDockWidgetArea);
+        return dock;
+    }
+
+    void applyStyles() {
+        qApp->setFont(QFont(QStringLiteral("Microsoft YaHei UI"), 9));
+        setStyleSheet(QStringLiteral(R"(
+            QMainWindow {
+                background: #0B1018;
+                color: #D7DEE9;
+            }
+            QFrame#headerBar {
+                background: #111823;
+                border-bottom: 1px solid #223044;
+            }
+            QLabel#appTitle {
+                color: #F4F7FB;
+                font-size: 19px;
+                font-weight: 700;
+            }
+            QLabel#appSubtitle {
+                color: #8291A8;
+                font-size: 12px;
+            }
+            QLabel[statusBadge="true"] {
+                padding: 4px 10px;
+                border: 1px solid #2E3D54;
+                border-radius: 2px;
+                color: #C7D1E0;
+                background: #151F2D;
+            }
+            QLabel#offlineBadge {
+                color: #FFB4A8;
+                border-color: #6D332E;
+                background: #241717;
+            }
+            QLabel#idleBadge {
+                color: #FFDDA0;
+                border-color: #685025;
+                background: #211B10;
+            }
+            QLabel#mcpBadge {
+                color: #9EE8C3;
+                border-color: #28664A;
+                background: #102018;
+            }
+            QDockWidget {
+                color: #C8D2E1;
+                titlebar-close-icon: none;
+                titlebar-normal-icon: none;
+            }
+            QDockWidget::title {
+                background: #111823;
+                border: 1px solid #223044;
+                padding: 7px 10px;
+                text-align: left;
+            }
+            QFrame#controlRail,
+            QFrame#activityPane,
+            QFrame#inspectorPane,
+            QFrame#modulesPane,
+            QFrame#rawPane {
+                background: #0F1622;
+                border: 1px solid #223044;
+            }
+            QLabel#sectionTitle,
+            QLabel#workspaceTitle {
+                color: #F4F7FB;
+                font-weight: 700;
+                font-size: 13px;
+            }
+            QLabel#workspaceTitle {
+                font-size: 17px;
+            }
+            QLineEdit {
+                min-height: 30px;
+                padding: 3px 8px;
+                color: #E7EDF6;
+                background: #0B1018;
+                border: 1px solid #2A3A50;
+                border-radius: 2px;
+                selection-background-color: #315D9C;
+            }
+            QPushButton,
+            QToolButton {
+                padding: 5px 10px;
+                border-radius: 2px;
+                border: 1px solid #33465F;
+                background: #182335;
+                color: #D8E2EF;
+                font-weight: 600;
+            }
+            QPushButton#primaryButton,
+            QToolButton:checked {
+                background: #1F5C96;
+                border-color: #2F75B6;
+                color: #F3F8FF;
+            }
+            QPushButton#secondaryButton {
+                background: #121B29;
+            }
+            QPushButton#dangerButton {
+                color: #FFC6C0;
+                background: #2A1718;
+                border-color: #6D3330;
+            }
+            QTableWidget {
+                background: #0B1018;
+                alternate-background-color: #0F1724;
+                color: #DCE5F1;
+                border: 1px solid #223044;
+                gridline-color: transparent;
+                selection-background-color: #21466F;
+                selection-color: #FFFFFF;
+            }
+            QHeaderView::section {
+                background: #151F2D;
+                color: #9FB0C7;
+                border: 0;
+                border-bottom: 1px solid #26364A;
+                padding: 7px 8px;
+                font-weight: 700;
+            }
+            QPlainTextEdit {
+                background: #0B1018;
+                color: #DCE5F1;
+                border: 1px solid #223044;
+                border-radius: 2px;
+                padding: 10px;
+                selection-background-color: #315D9C;
+                font-family: Consolas, "Cascadia Mono", monospace;
+                font-size: 12px;
+            }
+            QTabWidget::pane {
+                border: 0;
+            }
+            QTabBar::tab {
+                background: #121B29;
+                color: #9FB0C7;
+                border: 1px solid #223044;
+                padding: 7px 12px;
+                margin-right: 2px;
+            }
+            QTabBar::tab:selected {
+                background: #1A2638;
+                color: #F4F7FB;
+            }
+        )"));
+    }
+
+    QTableWidget* slotsTable_ = nullptr;
+    QTableWidget* breakpointsTable_ = nullptr;
+    QTableWidget* hitsTable_ = nullptr;
+    QPlainTextEdit* registerText_ = nullptr;
+    QPlainTextEdit* modulesText_ = nullptr;
+    QPlainTextEdit* rawText_ = nullptr;
+    QPlainTextEdit* logText_ = nullptr;
+    QTcpServer mcpPreviewServer_;
 };
 
 } // namespace
 
 int main(int argc, char** argv) {
-    QGuiApplication::setHighDpiScaleFactorRoundingPolicy(Qt::HighDpiScaleFactorRoundingPolicy::PassThrough);
     QApplication app(argc, argv);
-    QApplication::setFont(QFont("Microsoft YaHei UI", 9));
-
-    DebuggerWindow window;
+    DebuggerShellWindow window;
     window.show();
     return app.exec();
 }

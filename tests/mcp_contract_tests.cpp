@@ -55,8 +55,8 @@ int main(int argc, char** argv) {
 
     require(contains(mainCpp, "xc::mcp::handleRequest") && contains(coreCpp, "\"jsonrpc\":\"2.0\"") && contains(coreCpp, "\"initialize\"") && contains(coreCpp, "\"tools/list\"") && contains(coreCpp, "\"tools/call\""),
             "MCP core should implement JSON-RPC initialize, tools/list and tools/call while stdio main stays thin");
-    require(contains(guiCpp, "QTcpServer") && contains(guiCpp, "127.0.0.1") && contains(guiCpp, "/mcp") && contains(guiCpp, "xc::mcp::handleRequest"),
-            "PC debugger should expose an embedded localhost HTTP MCP endpoint");
+    require(contains(guiCpp, "QTcpServer") && contains(guiCpp, "127.0.0.1") && contains(guiCpp, "/mcp") && contains(guiCpp, "xc::mcp::serverName"),
+            "temporary PC debugger shell should keep embedded MCP endpoint preview hooks");
     require(contains(coreCpp, "connect_agent") && contains(coreCpp, "driver_status") && contains(coreCpp, "list_breakpoints"),
             "MCP tools should let AI connect and inspect driver/breakpoint state");
     require(contains(coreCpp, "set_breakpoint") && contains(coreCpp, "remove_breakpoint") && contains(coreCpp, "get_hit_records"),
